@@ -1,0 +1,1511 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Générateur de Slimes - Vraie Physique Verlet</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #121218;
+            touch-action: none;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="slimeCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('slimeCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    if (!CanvasRenderingContext2D.prototype.roundRect) {
+        CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r) {
+            const radius = Math.max(0, Math.min(r, Math.abs(w) * 0.5, Math.abs(h) * 0.5));
+            this.moveTo(x + radius, y);
+            this.arcTo(x + w, y, x + w, y + h, radius);
+            this.arcTo(x + w, y + h, x, y + h, radius);
+            this.arcTo(x, y + h, x, y, radius);
+            this.arcTo(x, y, x + w, y, radius);
+            return this;
+        };
+    }
+
+    const TYPES = ['cute', 'normal', 'scary'];
+    let particles = [];
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x; this.y = y;
+            let angle = Math.random() * Math.PI * 2;
+            let speed = Math.random() * 15 + 5;
+            this.vx = Math.cos(angle) * speed;
+            this.vy = Math.sin(angle) * speed;
+            this.life = 1.0;
+            this.decay = 0.02 + Math.random() * 0.03;
+            this.color = color;
+            this.size = Math.random() * 12 + 4;
+        }
+
+        generateGenome() {
+            const bodyShapePool = [
+                'round', 'pear', 'dumpling', 'blob', 'teardrop', 'mochi', 'puff', 'wisp',
+                'jellybean', 'bell', 'comet', 'puddle'
+            ];
+            const cuteEyePool = ['dot', 'sparkle', 'big_round', 'sleepy', 'happy_arc', 'heart', 'droplet'];
+            const normalEyePool = ['dot', 'big_round', 'sleepy', 'wide', 'wink', 'half_lid', 'uneven'];
+            const scaryEyePool = ['slit', 'angry_arc', 'void', 'wide', 'spiral', 'half_lid'];
+            const mouthByType = {
+                cute: ['smile', 'cat', 'tiny_o', 'grin', 'open_smile', 'pout'],
+                normal: ['smile', 'smirk', 'flat', 'tiny_o', 'open_smile', 'tiny_frown'],
+                scary: ['fangs', 'zigzag', 'smirk', 'flat', 'toothy', 'squiggle']
+            };
+            const moodPool = ['calm', 'joyful', 'sleepy', 'mischief', 'grumpy', 'curious', 'shy', 'dreamy', 'smug', 'dizzy'];
+            const detailPool = ['none', 'freckles', 'blush', 'brow', 'speckles', 'shine_plus', 'lashes', 'under_eyes', 'cheek_marks'];
+            const accessoryByType = {
+                cute: ['none', 'bow', 'flower', 'sprout', 'star_pin', 'halo', 'clover'],
+                normal: ['none', 'leaf', 'sprout', 'mushroom', 'antenna', 'feather', 'shell_pin'],
+                scary: ['none', 'horns', 'crown', 'spikes', 'antenna', 'bone_pin', 'broken_halo']
+            };
+
+            const hue = Math.random() * 360;
+            let saturation = this.type === 'scary' ? 78 + Math.random() * 14 : 84 + Math.random() * 14;
+            let lightness = this.type === 'scary' ? 34 + Math.random() * 10 : (this.type === 'cute' ? 67 + Math.random() * 12 : 54 + Math.random() * 14);
+
+            const bodyShape = bodyShapePool[Math.floor(Math.random() * bodyShapePool.length)];
+            const eyePool = this.type === 'cute' ? cuteEyePool : (this.type === 'scary' ? scaryEyePool : normalEyePool);
+            const eyeStyle = eyePool[Math.floor(Math.random() * eyePool.length)];
+            const mouthPool = mouthByType[this.type];
+            const mouthStyle = mouthPool[Math.floor(Math.random() * mouthPool.length)];
+            const mood = moodPool[Math.floor(Math.random() * moodPool.length)];
+            const detailTrait = detailPool[Math.floor(Math.random() * detailPool.length)];
+            const accessoryPool = accessoryByType[this.type];
+            const accessory = accessoryPool[Math.floor(Math.random() * accessoryPool.length)];
+
+            let friction = this.type === 'cute' ? 0.98 : (this.type === 'scary' ? 0.94 : 0.96);
+            let rigidity = this.type === 'cute' ? 0.06 : (this.type === 'scary' ? 0.03 : 0.14);
+            let bounceDamping = this.type === 'scary' ? 0.26 : 0.2;
+            let surfaceSmoothness = 0.035;
+            let volumeBias = 1;
+
+            let faceScale = 0.92 + Math.random() * 0.24;
+            let eyeSpacingBias = -0.12 + Math.random() * 0.24;
+            let eyeSizeBias = -0.18 + Math.random() * 0.36;
+            let mouthOffsetY = -1 + Math.random() * 3;
+            let cheekIntensity = Math.random();
+            let accessorySizeBias = 0.9 + Math.random() * 0.22;
+
+            if (bodyShape === 'pear') rigidity += 0.015;
+            if (bodyShape === 'dumpling') { rigidity += 0.018; volumeBias = 1.06; }
+            if (bodyShape === 'blob') surfaceSmoothness = 0.028;
+            if (bodyShape === 'teardrop') rigidity += 0.01;
+            if (bodyShape === 'mochi') { friction += 0.01; surfaceSmoothness = 0.04; }
+            if (bodyShape === 'puff') { rigidity += 0.008; volumeBias = 1.04; }
+            if (bodyShape === 'wisp') { rigidity -= 0.01; surfaceSmoothness = 0.026; faceScale *= 0.95; }
+            if (bodyShape === 'jellybean') { volumeBias = 1.03; faceScale *= 0.97; }
+            if (bodyShape === 'bell') { rigidity += 0.012; eyeSpacingBias *= 0.8; }
+            if (bodyShape === 'comet') { surfaceSmoothness = 0.03; friction -= 0.01; }
+            if (bodyShape === 'puddle') { rigidity -= 0.008; volumeBias = 1.08; faceScale *= 1.05; }
+
+            if (mood === 'sleepy') { friction += 0.01; mouthOffsetY += 1; }
+            if (mood === 'joyful') { bounceDamping -= 0.03; eyeSizeBias += 0.08; }
+            if (mood === 'grumpy') { rigidity += 0.01; mouthOffsetY -= 0.5; }
+            if (mood === 'mischief') { saturation += 4; eyeSpacingBias += 0.04; }
+            if (mood === 'calm') surfaceSmoothness += 0.006;
+            if (mood === 'shy') { cheekIntensity = Math.min(1, cheekIntensity + 0.4); faceScale *= 0.95; }
+            if (mood === 'dreamy') { lightness += 3; eyeSizeBias += 0.04; }
+            if (mood === 'smug') { mouthOffsetY -= 1; eyeSpacingBias += 0.03; }
+            if (mood === 'dizzy') { bounceDamping += 0.04; }
+
+            return {
+                hue,
+                saturation: Math.min(100, saturation),
+                lightness: Math.min(90, lightness),
+                bodyShape,
+                eyeStyle,
+                mouthStyle,
+                mood,
+                accessory,
+                detailTrait,
+                friction,
+                rigidity,
+                bounceDamping: Math.max(0.1, bounceDamping),
+                surfaceSmoothness,
+                volumeBias,
+                faceScale,
+                eyeSpacingBias,
+                eyeSizeBias,
+                mouthOffsetY,
+                cheekIntensity,
+                accessorySizeBias
+            };
+        }
+
+        computeBodyRadius(angle) {
+            const shape = this.bodyShape;
+            const base = this.baseRadius;
+            let radius = base;
+
+            if (shape === 'round') {
+                radius += (Math.sin(angle * 3) + Math.cos(angle * 2)) * (base * 0.06);
+            } else if (shape === 'pear') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.18;
+                radius -= Math.max(0, -Math.sin(angle)) * base * 0.08;
+                radius += Math.cos(angle * 2) * base * 0.04;
+            } else if (shape === 'dumpling') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.13;
+                radius += Math.cos(angle * 4) * base * 0.035;
+            } else if (shape === 'blob') {
+                radius += Math.sin(angle * 5 + 0.4) * base * 0.08;
+                radius += Math.cos(angle * 3 - 0.7) * base * 0.06;
+            } else if (shape === 'teardrop') {
+                radius += Math.max(0, -Math.sin(angle)) * base * 0.16;
+                radius -= Math.max(0, Math.sin(angle)) * base * 0.06;
+                radius += Math.cos(angle * 2) * base * 0.03;
+            } else if (shape === 'mochi') {
+                radius += Math.cos(angle * 2) * base * 0.045;
+                radius += Math.sin(angle * 6) * base * 0.018;
+            } else if (shape === 'puff') {
+                radius += Math.sin(angle * 4) * base * 0.055;
+                radius += Math.cos(angle * 8) * base * 0.02;
+            } else if (shape === 'wisp') {
+                radius += Math.max(0, -Math.sin(angle)) * base * 0.1;
+                radius += Math.sin(angle * 2.5) * base * 0.07;
+            } else if (shape === 'jellybean') {
+                radius += Math.cos(angle) * base * 0.1;
+                radius += Math.sin(angle * 2) * base * 0.04;
+            } else if (shape === 'bell') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.16;
+                radius += Math.cos(angle * 3) * base * 0.025;
+                radius -= Math.max(0, -Math.sin(angle)) * base * 0.02;
+            } else if (shape === 'comet') {
+                radius += Math.max(0, -Math.cos(angle)) * base * 0.15;
+                radius += Math.sin(angle * 3) * base * 0.03;
+            } else if (shape === 'puddle') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.08;
+                radius += Math.cos(angle * 2) * base * 0.07;
+                radius += Math.sin(angle * 6) * base * 0.015;
+            }
+
+            radius *= this.volumeBias;
+            return Math.max(base * 0.7, radius);
+        }
+
+        update() {
+            this.vx *= 0.92; this.vy *= 0.92;
+            this.vy += 0.5;
+            this.x += this.vx; this.y += this.vy;
+            this.life -= this.decay;
+        }
+        draw() {
+            ctx.globalAlpha = Math.max(0, this.life);
+            ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2); ctx.fill();
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    // --- MOTEUR PHYSIQUE VERLET PUR ---
+    class VerletPoint {
+        constructor(x, y) {
+            this.x = x; this.y = y;
+            this.oldX = x; this.oldY = y;
+        }
+    }
+
+    class Slime {
+        constructor() {
+            this.type = TYPES[Math.floor(Math.random() * TYPES.length)];
+            this.baseRadius = 50 + Math.random() * 30;
+            this.numNodes = 25; 
+            
+            let hue = Math.random() * 360;
+            if (this.type === 'cute') {
+                this.color = `hsl(${hue}, 90%, 75%)`;
+                this.darkColor = `hsl(${hue}, 90%, 60%)`;
+                this.friction = 0.98; 
+                this.rigidity = 0.06; // Ancien: 0.05
+                this.accessory = Math.random() > 0.5 ? 'bow' : 'none';
+            } else if (this.type === 'scary') {
+                this.color = `hsl(${hue}, 80%, 35%)`;
+                this.darkColor = `hsl(${hue}, 80%, 15%)`;
+                this.friction = 0.94; 
+                this.rigidity = 0.02; // Ancien: 0.01
+                this.accessory = Math.random() > 0.5 ? 'horns' : 'none';
+            } else {
+                this.color = `hsl(${hue}, 95%, 60%)`;
+                this.darkColor = `hsl(${hue}, 95%, 45%)`;
+                this.friction = 0.96;
+                this.rigidity = 0.16; // Ancien: 0.15
+                this.accessory = Math.random() > 0.5 ? 'leaf' : 'none';
+            }
+
+            const genome = this.generateGenome();
+            this.hue = genome.hue;
+            this.saturation = genome.saturation;
+            this.lightness = genome.lightness;
+            this.bodyShape = genome.bodyShape;
+            this.eyeStyle = genome.eyeStyle;
+            this.mouthStyle = genome.mouthStyle;
+            this.mood = genome.mood;
+            this.accessory = genome.accessory;
+            this.detailTrait = genome.detailTrait;
+            this.friction = genome.friction;
+            this.rigidity = genome.rigidity;
+            this.bounceDamping = genome.bounceDamping;
+            this.surfaceSmoothness = genome.surfaceSmoothness;
+            this.volumeBias = genome.volumeBias;
+            this.faceScale = genome.faceScale;
+            this.eyeSpacingBias = genome.eyeSpacingBias;
+            this.eyeSizeBias = genome.eyeSizeBias;
+            this.mouthOffsetY = genome.mouthOffsetY;
+            this.cheekIntensity = genome.cheekIntensity;
+            this.accessorySizeBias = genome.accessorySizeBias;
+            this.color = `hsl(${this.hue}, ${this.saturation}%, ${this.lightness}%)`;
+            this.darkColor = `hsl(${this.hue}, ${Math.max(35, this.saturation - 8)}%, ${Math.max(12, this.lightness - 16)}%)`;
+            this.highlightColor = `hsla(${this.hue}, ${Math.max(30, this.saturation - 10)}%, ${Math.min(96, this.lightness + 18)}%, 0.32)`;
+
+            // --- SECURITE ABSOLUE : valeurs non finies/interdites ---
+            this.friction = Number.isFinite(this.friction) ? this.friction : 0.96;
+            this.rigidity = Number.isFinite(this.rigidity) ? Math.max(0.02, this.rigidity) : 0.08;
+            this.bounceDamping = Number.isFinite(this.bounceDamping) ? this.bounceDamping : 0.2;
+            this.surfaceSmoothness = Number.isFinite(this.surfaceSmoothness) ? this.surfaceSmoothness : 0.035;
+            this.volumeBias = Number.isFinite(this.volumeBias) ? this.volumeBias : 1;
+            this.faceScale = Number.isFinite(this.faceScale) ? this.faceScale : 1;
+            this.eyeSpacingBias = Number.isFinite(this.eyeSpacingBias) ? this.eyeSpacingBias : 0;
+            this.eyeSizeBias = Number.isFinite(this.eyeSizeBias) ? this.eyeSizeBias : 0;
+            this.mouthOffsetY = Number.isFinite(this.mouthOffsetY) ? this.mouthOffsetY : 0;
+            this.cheekIntensity = Number.isFinite(this.cheekIntensity) ? this.cheekIntensity : 0.5;
+            this.accessorySizeBias = Number.isFinite(this.accessorySizeBias) ? this.accessorySizeBias : 1;
+
+            this.accessoryAttachment = this.createAccessoryAttachment();
+
+            this.nextBlink = Date.now() + Math.random() * 4000 + 1000;
+            this.isBlinking = false;
+
+            let startX = width / 2;
+            let startY = height / 2; // Apparition propre au centre
+            
+            let spawnImpulseY = (Math.random() - 0.5) * 4; 
+            let spawnImpulseX = 0; // pas d'impulsion latérale gratuite au spawn
+            
+            this.nodes = [];
+            this.visualCenterX = startX;
+            this.visualCenterY = startY;
+            this.prevVisualCenterX = startX - spawnImpulseX;
+            this.prevVisualCenterY = startY - spawnImpulseY;
+            this.targetDistances = [];
+            
+            for (let i = 0; i < this.numNodes; i++) {
+                let angle = (i / this.numNodes) * Math.PI * 2;
+                let r = this.computeBodyRadius(angle);
+                
+                let nx = startX + Math.cos(angle) * r;
+                let ny = startY + Math.sin(angle) * r;
+                
+                let pt = new VerletPoint(nx, ny);
+                pt.oldX = nx - spawnImpulseX;
+                pt.oldY = ny - spawnImpulseY; 
+                this.nodes.push(pt);
+                this.targetDistances.push(r); 
+            }
+
+            let n1 = this.nodes[0];
+            let n2 = this.nodes[1];
+            this.perimeterDist = Math.hypot(n2.x - n1.x, n2.y - n1.y);
+
+            // Recentrage physique du shape au spawn :
+            // on ne recentre pas le slime vers l'écran, on aligne seulement
+            // le centre géométrique réel du corps sur son point d'apparition.
+            // Cela évite qu'un shape asymétrique naisse déjà décalé et transforme
+            // la chute verticale en locomotion latérale parasite.
+            const initialCenter = this.getRawVisualCenter();
+            const shiftX = startX - initialCenter.x;
+            const shiftY = startY - initialCenter.y;
+            if (Number.isFinite(shiftX) && Number.isFinite(shiftY)) {
+                for (let pt of this.nodes) {
+                    pt.x += shiftX;
+                    pt.y += shiftY;
+                    pt.oldX += shiftX;
+                    pt.oldY += shiftY;
+                }
+                this.visualCenterX = startX;
+                this.visualCenterY = startY;
+                this.prevVisualCenterX = startX - spawnImpulseX;
+                this.prevVisualCenterY = startY - spawnImpulseY;
+            }
+
+            this.state = 'bouncing';
+            this.age = 0;
+            this.draggedNode = null;
+            this.boxPadding = Math.max(22, Math.min(width, height) * 0.04);
+        }
+
+
+        generateGenome() {
+            const bodyShapePool = [
+                'round', 'pear', 'dumpling', 'blob', 'teardrop', 'mochi', 'puff', 'wisp',
+                'jellybean', 'bell', 'comet', 'puddle'
+            ];
+            const cuteEyePool = ['dot', 'sparkle', 'big_round', 'sleepy', 'happy_arc', 'heart', 'droplet'];
+            const normalEyePool = ['dot', 'big_round', 'sleepy', 'wide', 'wink', 'half_lid', 'uneven'];
+            const scaryEyePool = ['slit', 'angry_arc', 'void', 'wide', 'spiral', 'half_lid'];
+            const mouthByType = {
+                cute: ['smile', 'cat', 'tiny_o', 'grin', 'open_smile', 'pout'],
+                normal: ['smile', 'smirk', 'flat', 'tiny_o', 'open_smile', 'tiny_frown'],
+                scary: ['fangs', 'zigzag', 'smirk', 'flat', 'toothy', 'squiggle']
+            };
+            const moodPool = ['calm', 'joyful', 'sleepy', 'mischief', 'grumpy', 'curious', 'shy', 'dreamy', 'smug', 'dizzy'];
+            const detailPool = ['none', 'freckles', 'blush', 'brow', 'speckles', 'shine_plus', 'lashes', 'under_eyes', 'cheek_marks'];
+            const accessoryByType = {
+                cute: ['none', 'bow', 'flower', 'sprout', 'star_pin', 'halo', 'clover'],
+                normal: ['none', 'leaf', 'sprout', 'mushroom', 'antenna', 'feather', 'shell_pin'],
+                scary: ['none', 'horns', 'crown', 'spikes', 'antenna', 'bone_pin', 'broken_halo']
+            };
+
+            const hue = Math.random() * 360;
+            let saturation = this.type === 'scary' ? 78 + Math.random() * 14 : 84 + Math.random() * 14;
+            let lightness = this.type === 'scary' ? 34 + Math.random() * 10 : (this.type === 'cute' ? 67 + Math.random() * 12 : 54 + Math.random() * 14);
+
+            const bodyShape = bodyShapePool[Math.floor(Math.random() * bodyShapePool.length)];
+            const eyePool = this.type === 'cute' ? cuteEyePool : (this.type === 'scary' ? scaryEyePool : normalEyePool);
+            const eyeStyle = eyePool[Math.floor(Math.random() * eyePool.length)];
+            const mouthPool = mouthByType[this.type];
+            const mouthStyle = mouthPool[Math.floor(Math.random() * mouthPool.length)];
+            const mood = moodPool[Math.floor(Math.random() * moodPool.length)];
+            const detailTrait = detailPool[Math.floor(Math.random() * detailPool.length)];
+            const accessoryPool = accessoryByType[this.type];
+            const accessory = accessoryPool[Math.floor(Math.random() * accessoryPool.length)];
+
+            let friction = this.type === 'cute' ? 0.98 : (this.type === 'scary' ? 0.94 : 0.96);
+            let rigidity = this.type === 'cute' ? 0.06 : (this.type === 'scary' ? 0.03 : 0.14);
+            let bounceDamping = this.type === 'scary' ? 0.26 : 0.2;
+            let surfaceSmoothness = 0.035;
+            let volumeBias = 1;
+
+            let faceScale = 0.92 + Math.random() * 0.24;
+            let eyeSpacingBias = -0.12 + Math.random() * 0.24;
+            let eyeSizeBias = -0.18 + Math.random() * 0.36;
+            let mouthOffsetY = -1 + Math.random() * 3;
+            let cheekIntensity = Math.random();
+            let accessorySizeBias = 0.9 + Math.random() * 0.22;
+
+            if (bodyShape === 'pear') rigidity += 0.015;
+            if (bodyShape === 'dumpling') { rigidity += 0.018; volumeBias = 1.06; }
+            if (bodyShape === 'blob') surfaceSmoothness = 0.028;
+            if (bodyShape === 'teardrop') rigidity += 0.01;
+            if (bodyShape === 'mochi') { friction += 0.01; surfaceSmoothness = 0.04; }
+            if (bodyShape === 'puff') { rigidity += 0.008; volumeBias = 1.04; }
+            if (bodyShape === 'wisp') { rigidity -= 0.01; surfaceSmoothness = 0.026; faceScale *= 0.95; }
+            if (bodyShape === 'jellybean') { volumeBias = 1.03; faceScale *= 0.97; }
+            if (bodyShape === 'bell') { rigidity += 0.012; eyeSpacingBias *= 0.8; }
+            if (bodyShape === 'comet') { surfaceSmoothness = 0.03; friction -= 0.01; }
+            if (bodyShape === 'puddle') { rigidity -= 0.008; volumeBias = 1.08; faceScale *= 1.05; }
+
+            if (mood === 'sleepy') { friction += 0.01; mouthOffsetY += 1; }
+            if (mood === 'joyful') { bounceDamping -= 0.03; eyeSizeBias += 0.08; }
+            if (mood === 'grumpy') { rigidity += 0.01; mouthOffsetY -= 0.5; }
+            if (mood === 'mischief') { saturation += 4; eyeSpacingBias += 0.04; }
+            if (mood === 'calm') surfaceSmoothness += 0.006;
+            if (mood === 'shy') { cheekIntensity = Math.min(1, cheekIntensity + 0.4); faceScale *= 0.95; }
+            if (mood === 'dreamy') { lightness += 3; eyeSizeBias += 0.04; }
+            if (mood === 'smug') { mouthOffsetY -= 1; eyeSpacingBias += 0.03; }
+            if (mood === 'dizzy') { bounceDamping += 0.04; }
+
+            return {
+                hue,
+                saturation: Math.min(100, saturation),
+                lightness: Math.min(90, lightness),
+                bodyShape,
+                eyeStyle,
+                mouthStyle,
+                mood,
+                accessory,
+                detailTrait,
+                friction,
+                rigidity,
+                bounceDamping: Math.max(0.1, bounceDamping),
+                surfaceSmoothness,
+                volumeBias,
+                faceScale,
+                eyeSpacingBias,
+                eyeSizeBias,
+                mouthOffsetY,
+                cheekIntensity,
+                accessorySizeBias
+            };
+        }
+
+        computeBodyRadius(angle) {
+            const shape = this.bodyShape;
+            const base = this.baseRadius;
+            let radius = base;
+
+            if (shape === 'round') {
+                radius += (Math.sin(angle * 3) + Math.cos(angle * 2)) * (base * 0.06);
+            } else if (shape === 'pear') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.18;
+                radius -= Math.max(0, -Math.sin(angle)) * base * 0.08;
+                radius += Math.cos(angle * 2) * base * 0.04;
+            } else if (shape === 'dumpling') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.13;
+                radius += Math.cos(angle * 4) * base * 0.035;
+            } else if (shape === 'blob') {
+                radius += Math.sin(angle * 5 + 0.4) * base * 0.08;
+                radius += Math.cos(angle * 3 - 0.7) * base * 0.06;
+            } else if (shape === 'teardrop') {
+                radius += Math.max(0, -Math.sin(angle)) * base * 0.16;
+                radius -= Math.max(0, Math.sin(angle)) * base * 0.06;
+                radius += Math.cos(angle * 2) * base * 0.03;
+            } else if (shape === 'mochi') {
+                radius += Math.cos(angle * 2) * base * 0.045;
+                radius += Math.sin(angle * 6) * base * 0.018;
+            } else if (shape === 'puff') {
+                radius += Math.sin(angle * 4) * base * 0.055;
+                radius += Math.cos(angle * 8) * base * 0.02;
+            } else if (shape === 'wisp') {
+                radius += Math.max(0, -Math.sin(angle)) * base * 0.1;
+                radius += Math.sin(angle * 2.5) * base * 0.07;
+            } else if (shape === 'jellybean') {
+                radius += Math.cos(angle) * base * 0.1;
+                radius += Math.sin(angle * 2) * base * 0.04;
+            } else if (shape === 'bell') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.16;
+                radius += Math.cos(angle * 3) * base * 0.025;
+                radius -= Math.max(0, -Math.sin(angle)) * base * 0.02;
+            } else if (shape === 'comet') {
+                radius += Math.max(0, -Math.cos(angle)) * base * 0.15;
+                radius += Math.sin(angle * 3) * base * 0.03;
+            } else if (shape === 'puddle') {
+                radius += Math.max(0, Math.sin(angle)) * base * 0.08;
+                radius += Math.cos(angle * 2) * base * 0.07;
+                radius += Math.sin(angle * 6) * base * 0.015;
+            }
+
+            radius *= this.volumeBias;
+            return Math.max(base * 0.7, radius);
+        }
+
+        update() {
+            if (!this.draggedNode) this.age++;
+
+            if (this.age > 600 && this.state === 'bouncing') {
+                this.draggedNode = null;
+                this.explode();
+                return;
+            }
+
+            let gravity = 0.8;
+            const box = this.getBoxBounds();
+            let floor = box.bottom;
+            let margin = box.left;
+            let rightMargin = box.right;
+            let topMargin = box.top;
+
+            for (let pt of this.nodes) {
+                if (pt === this.draggedNode) {
+                    pt.x = this.dragX;
+                    pt.y = this.dragY;
+                    pt.oldX = pt.x; 
+                    pt.oldY = pt.y;
+                    continue;
+                }
+
+                let vx = (pt.x - pt.oldX) * this.friction;
+                let vy = (pt.y - pt.oldY) * this.friction;
+
+                pt.oldX = pt.x;
+                pt.oldY = pt.y;
+                pt.x += vx;
+                pt.y += vy + gravity;
+            }
+
+            let iterations = 6; 
+            let isExploded = false;
+
+            for (let iter = 0; iter < iterations; iter++) {
+                const centroid = this.getConstraintCenter();
+
+                for (let i = 0; i < this.numNodes; i++) {
+                    let p1 = this.nodes[i];
+                    let p2 = this.nodes[(i + 1) % this.numNodes];
+
+                    let dx = p2.x - p1.x;
+                    let dy = p2.y - p1.y;
+                    let dist = Math.hypot(dx, dy) || 1;
+
+                    let diff = this.perimeterDist - dist;
+                    let percent = (diff / dist) * 0.5; 
+                    let offsetX = dx * percent;
+                    let offsetY = dy * percent;
+
+                    if (p1 !== this.draggedNode) { p1.x -= offsetX; p1.y -= offsetY; }
+                    if (p2 !== this.draggedNode) { p2.x += offsetX; p2.y += offsetY; }
+                }
+
+                for (let i = 0; i < this.numNodes; i++) {
+                    let pt = this.nodes[i];
+                    let dx = pt.x - centroid.x;
+                    let dy = pt.y - centroid.y;
+                    let dist = Math.hypot(dx, dy) || 1;
+
+                    let diff = this.targetDistances[i] - dist;
+                    let percent = (diff / dist) * this.rigidity; 
+                    let offsetX = dx * percent;
+                    let offsetY = dy * percent;
+
+                    if (pt !== this.draggedNode) { pt.x += offsetX; pt.y += offsetY; }
+
+                    if (dist > this.baseRadius * 4.5) isExploded = true;
+                }
+
+                let areaHoldStrength = this.surfaceSmoothness;
+                for (let i = 0; i < this.numNodes; i++) {
+                    let pt = this.nodes[i];
+                    let prev = this.nodes[(i - 1 + this.numNodes) % this.numNodes];
+                    let next = this.nodes[(i + 1) % this.numNodes];
+
+                    let smoothX = (prev.x + next.x) * 0.5;
+                    let smoothY = (prev.y + next.y) * 0.5;
+
+                    if (pt !== this.draggedNode) {
+                        pt.x += (smoothX - pt.x) * areaHoldStrength;
+                        pt.y += (smoothY - pt.y) * areaHoldStrength;
+                    }
+                }
+
+                let repulsionRadius = this.baseRadius * 0.45; 
+                for (let i = 0; i < this.numNodes; i++) {
+                    for (let j = i + 2; j < this.numNodes; j++) {
+                        if (i === 0 && j === this.numNodes - 1) continue; 
+
+                        let p1 = this.nodes[i];
+                        let p2 = this.nodes[j];
+                        let dx = p2.x - p1.x;
+                        let dy = p2.y - p1.y;
+                        let dist = Math.hypot(dx, dy);
+
+                        if (dist > 0 && dist < repulsionRadius) {
+                            let diff = repulsionRadius - dist;
+                            let percent = (diff / dist) * 0.5;
+                            let offsetX = dx * percent;
+                            let offsetY = dy * percent;
+
+                            if (p1 !== this.draggedNode) { p1.x -= offsetX; p1.y -= offsetY; }
+                            if (p2 !== this.draggedNode) { p2.x += offsetX; p2.y += offsetY; }
+                        }
+                    }
+                }
+
+                for (let pt of this.nodes) {
+                    if (pt.y > floor) {
+                        pt.y = floor;
+                        let vx = pt.x - pt.oldX;
+                        pt.oldX = pt.x - vx * 0.5; 
+                        let vy = pt.y - pt.oldY;
+                        pt.oldY = pt.y + vy * this.bounceDamping; 
+                    }
+                    if (pt.x < margin) { pt.x = margin; pt.oldX = pt.x + (pt.x - pt.oldX) * 0.5; }
+                    if (pt.x > rightMargin) { pt.x = rightMargin; pt.oldX = pt.x + (pt.x - pt.oldX) * 0.5; }
+                    if (pt.y < topMargin) { pt.y = topMargin; pt.oldY = pt.y + (pt.y - pt.oldY) * 0.5; }
+                }
+            }
+
+            const rawCenter = this.getRawVisualCenter();
+            const previousCenterX = Number.isFinite(this.visualCenterX) ? this.visualCenterX : rawCenter.x;
+            const previousCenterY = Number.isFinite(this.visualCenterY) ? this.visualCenterY : rawCenter.y;
+            const centerSmoothing = this.draggedNode ? 0.32 : 0.18;
+            const smoothedCenterX = previousCenterX + (rawCenter.x - previousCenterX) * centerSmoothing;
+            const smoothedCenterY = previousCenterY + (rawCenter.y - previousCenterY) * centerSmoothing;
+
+            this.prevVisualCenterX = previousCenterX;
+            this.prevVisualCenterY = previousCenterY;
+            this.visualCenterX = Number.isFinite(smoothedCenterX) ? smoothedCenterX : rawCenter.x;
+            this.visualCenterY = Number.isFinite(smoothedCenterY) ? smoothedCenterY : rawCenter.y;
+
+            this.stabilizeHorizontalDrift();
+
+            if (isExploded) this.explode();
+        }
+
+        getBoxBounds() {
+            const pad = Number.isFinite(this.boxPadding) ? this.boxPadding : Math.max(22, Math.min(width, height) * 0.04);
+            return {
+                left: pad,
+                top: pad,
+                right: width - pad,
+                bottom: height - pad
+            };
+        }
+
+        drawContainmentBox() {
+            const box = this.getBoxBounds();
+            const boxWidth = box.right - box.left;
+            const boxHeight = box.bottom - box.top;
+
+            ctx.save();
+            ctx.fillStyle = 'rgba(255,255,255,0.018)';
+            ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            if (typeof ctx.roundRect === 'function') {
+                ctx.roundRect(box.left, box.top, boxWidth, boxHeight, 24);
+            } else {
+                ctx.rect(box.left, box.top, boxWidth, boxHeight);
+            }
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.strokeStyle = 'rgba(255,255,255,0.045)';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            if (typeof ctx.roundRect === 'function') {
+                ctx.roundRect(box.left + 8, box.top + 8, boxWidth - 16, boxHeight - 16, 18);
+            } else {
+                ctx.rect(box.left + 8, box.top + 8, boxWidth - 16, boxHeight - 16);
+            }
+            ctx.stroke();
+            ctx.restore();
+        }
+
+        getRawVisualCenter() {
+            let twiceArea = 0;
+            let centroidX = 0;
+            let centroidY = 0;
+            let validVertices = 0;
+
+            for (let i = 0; i < this.numNodes; i++) {
+                const p1 = this.nodes[i];
+                const p2 = this.nodes[(i + 1) % this.numNodes];
+                if (!Number.isFinite(p1.x) || !Number.isFinite(p1.y) || !Number.isFinite(p2.x) || !Number.isFinite(p2.y)) continue;
+                const cross = p1.x * p2.y - p2.x * p1.y;
+                twiceArea += cross;
+                centroidX += (p1.x + p2.x) * cross;
+                centroidY += (p1.y + p2.y) * cross;
+                validVertices++;
+            }
+
+            if (validVertices >= 3 && Math.abs(twiceArea) > 1e-3) {
+                return {
+                    x: centroidX / (3 * twiceArea),
+                    y: centroidY / (3 * twiceArea)
+                };
+            }
+
+            let visualX = 0;
+            let visualY = 0;
+            let validCount = 0;
+            for (let pt of this.nodes) {
+                if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) continue;
+                visualX += pt.x;
+                visualY += pt.y;
+                validCount++;
+            }
+            if (validCount === 0) {
+                return { x: width * 0.5, y: height * 0.5 };
+            }
+            return {
+                x: visualX / validCount,
+                y: visualY / validCount
+            };
+        }
+
+        getConstraintCenter() {
+            // Les contraintes doivent s'appuyer sur le centre géométrique instantané,
+            // pas sur le centre visuel lissé, sinon on injecte une traction latérale parasite.
+            return this.getRawVisualCenter();
+        }
+
+        getVisualCenter() {
+            const rawCenter = this.getRawVisualCenter();
+            if (!Number.isFinite(this.visualCenterX) || !Number.isFinite(this.visualCenterY)) {
+                return rawCenter;
+            }
+            return {
+                x: this.visualCenterX,
+                y: this.visualCenterY
+            };
+        }
+
+
+        stabilizeHorizontalDrift() {
+            if (this.draggedNode) return;
+
+            const box = this.getBoxBounds();
+            const floor = box.bottom;
+            let sumVx = 0;
+            let sumVy = 0;
+            let count = 0;
+            let groundedCount = 0;
+            let wallTouches = 0;
+
+            for (let pt of this.nodes) {
+                if (!Number.isFinite(pt.x) || !Number.isFinite(pt.oldX) || !Number.isFinite(pt.y) || !Number.isFinite(pt.oldY)) continue;
+                sumVx += (pt.x - pt.oldX);
+                sumVy += (pt.y - pt.oldY);
+                count++;
+                if (pt.y >= floor - 1.5) groundedCount++;
+                if (pt.x <= box.left + 1 || pt.x >= box.right - 1) wallTouches++;
+            }
+            if (!count) return;
+
+            const groundedRatio = groundedCount / count;
+            if (groundedRatio < 0.22) return;
+            if (wallTouches > 0) return;
+
+            const avgVx = sumVx / count;
+            const avgVy = sumVy / count;
+            if (!Number.isFinite(avgVx) || !Number.isFinite(avgVy)) return;
+            if (Math.abs(avgVx) < 0.02) return;
+            if (Math.abs(avgVy) > 2.25) return;
+
+            // Ce n'est pas un recentrage vers l'écran :
+            // on enlève seulement une petite partie de la quantité de mouvement
+            // horizontale globale créée numériquement par le solveur alors que
+            // le slime est surtout en appui vertical.
+            const momentumBleed = groundedRatio > 0.55 ? 0.16 : 0.1;
+
+            for (let pt of this.nodes) {
+                if (!Number.isFinite(pt.x) || !Number.isFinite(pt.oldX) || !Number.isFinite(pt.y)) continue;
+                if (pt.y < floor - this.baseRadius * 0.2) continue;
+                const localVx = pt.x - pt.oldX;
+                const correctedVx = localVx - avgVx * momentumBleed;
+                pt.oldX = pt.x - correctedVx;
+            }
+        }
+
+        getBodyFrame(visualX, visualY, rotation) {
+            const cos = Math.cos(-rotation);
+            const sin = Math.sin(-rotation);
+            let minX = Infinity;
+            let maxX = -Infinity;
+            let minY = Infinity;
+            let maxY = -Infinity;
+
+            for (let pt of this.nodes) {
+                const dx = pt.x - visualX;
+                const dy = pt.y - visualY;
+                const localX = dx * cos - dy * sin;
+                const localY = dx * sin + dy * cos;
+                if (localX < minX) minX = localX;
+                if (localX > maxX) maxX = localX;
+                if (localY < minY) minY = localY;
+                if (localY > maxY) maxY = localY;
+            }
+
+            return { minX, maxX, minY, maxY };
+        }
+
+        createAccessoryAttachment() {
+            if (this.accessory === 'none') return null;
+
+            let localX = 0;
+            let localY = -1;
+            let skinOffset = -this.baseRadius * 0.014;
+            let rotationOffset = 0;
+            let scaleBoost = 1;
+
+            if (this.accessory === 'bow') {
+                localX = Math.random() > 0.5 ? -0.34 : 0.34;
+                localY = -0.94;
+                skinOffset = -this.baseRadius * 0.018;
+                scaleBoost = 1.02;
+            } else if (this.accessory === 'leaf' || this.accessory === 'sprout') {
+                localX = Math.random() > 0.5 ? -0.26 : 0.26;
+                localY = -0.97;
+                skinOffset = -this.baseRadius * 0.012;
+                rotationOffset = localX < 0 ? -0.2 : 0.2;
+            } else if (this.accessory === 'horns' || this.accessory === 'crown') {
+                localX = 0;
+                localY = -1;
+                skinOffset = -this.baseRadius * 0.006;
+            } else if (this.accessory === 'flower' || this.accessory === 'star_pin') {
+                localX = Math.random() > 0.5 ? -0.38 : 0.38;
+                localY = -0.9;
+                skinOffset = -this.baseRadius * 0.01;
+                rotationOffset = localX < 0 ? -0.1 : 0.1;
+                scaleBoost = 0.95;
+            } else if (this.accessory === 'mushroom') {
+                localX = Math.random() > 0.5 ? -0.2 : 0.2;
+                localY = -0.98;
+                skinOffset = -this.baseRadius * 0.004;
+                scaleBoost = 0.96;
+            } else if (this.accessory === 'spikes') {
+                localX = 0;
+                localY = -1;
+                skinOffset = -this.baseRadius * 0.004;
+                scaleBoost = 1.06;
+            } else if (this.accessory === 'antenna') {
+                localX = Math.random() > 0.5 ? -0.12 : 0.12;
+                localY = -1;
+                skinOffset = -this.baseRadius * 0.002;
+            } else if (this.accessory === 'halo' || this.accessory === 'broken_halo') {
+                localX = 0;
+                localY = -1;
+                skinOffset = -this.baseRadius * 0.1;
+                scaleBoost = 1.05;
+            } else if (this.accessory === 'clover' || this.accessory === 'feather' || this.accessory === 'shell_pin' || this.accessory === 'bone_pin') {
+                localX = Math.random() > 0.5 ? -0.32 : 0.32;
+                localY = -0.86;
+                skinOffset = -this.baseRadius * 0.006;
+                rotationOffset = localX < 0 ? -0.18 : 0.18;
+                scaleBoost = 0.94;
+            }
+
+            const len = Math.hypot(localX, localY) || 1;
+            return {
+                localX: localX / len,
+                localY: localY / len,
+                skinOffset,
+                rotationOffset,
+                scaleBoost
+            };
+        }
+
+        getSurfaceAnchorFromLocal(localDirX, localDirY, visualX, visualY, rotation) {
+            const cos = Math.cos(rotation);
+            const sin = Math.sin(rotation);
+            const worldDirX = localDirX * cos - localDirY * sin;
+            const worldDirY = localDirX * sin + localDirY * cos;
+            return this.getSurfaceAnchor(worldDirX, worldDirY, visualX, visualY);
+        }
+
+        getSurfaceAnchor(directionX, directionY, visualX, visualY) {
+            const dirLen = Math.hypot(directionX, directionY) || 1;
+            const nx = directionX / dirLen;
+            const ny = directionY / dirLen;
+
+            let bestIndex = 0;
+            let bestScore = -Infinity;
+            for (let i = 0; i < this.numNodes; i++) {
+                const pt = this.nodes[i];
+                const dx = pt.x - visualX;
+                const dy = pt.y - visualY;
+                const score = dx * nx + dy * ny;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestIndex = i;
+                }
+            }
+
+            const prev = this.nodes[(bestIndex - 1 + this.numNodes) % this.numNodes];
+            const current = this.nodes[bestIndex];
+            const next = this.nodes[(bestIndex + 1) % this.numNodes];
+
+            const anchorX = (prev.x + current.x + next.x) / 3;
+            const anchorY = (prev.y + current.y + next.y) / 3;
+            let tangentX = next.x - prev.x;
+            let tangentY = next.y - prev.y;
+            const tangentLen = Math.hypot(tangentX, tangentY) || 1;
+            tangentX /= tangentLen;
+            tangentY /= tangentLen;
+
+            let normalX = anchorX - visualX;
+            let normalY = anchorY - visualY;
+            const normalLen = Math.hypot(normalX, normalY) || 1;
+            normalX /= normalLen;
+            normalY /= normalLen;
+
+            return {
+                x: anchorX,
+                y: anchorY,
+                tangentX,
+                tangentY,
+                normalX,
+                normalY,
+                rotation: Math.atan2(tangentY, tangentX)
+            };
+        }
+
+        buildBodyPath() {
+            ctx.beginPath();
+            let startX = (this.nodes[0].x + this.nodes[this.numNodes - 1].x) / 2;
+            let startY = (this.nodes[0].y + this.nodes[this.numNodes - 1].y) / 2;
+            ctx.moveTo(startX, startY);
+
+            for (let i = 0; i < this.numNodes; i++) {
+                let nextNode = this.nodes[(i + 1) % this.numNodes];
+                let mx = (this.nodes[i].x + nextNode.x) / 2;
+                let my = (this.nodes[i].y + nextNode.y) / 2;
+                ctx.quadraticCurveTo(this.nodes[i].x, this.nodes[i].y, mx, my);
+            }
+            ctx.closePath();
+        }
+
+        draw() {
+            const box = this.getBoxBounds();
+            let floor = box.bottom;
+            const { x: visualX, y: visualY } = this.getVisualCenter();
+
+            {
+                let distToFloor = floor - visualY;
+                let shadowAlpha = Math.max(0, 0.5 - distToFloor * 0.001);
+                let shadowScale = Math.max(0.3, 1 - distToFloor * 0.002);
+                
+                ctx.save();
+                ctx.translate(visualX, floor + 5);
+                ctx.scale(1, 0.2);
+                ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
+                ctx.beginPath(); ctx.arc(0, 0, this.baseRadius * 1.5 * shadowScale, 0, Math.PI * 2); ctx.fill();
+                ctx.restore();
+            }
+
+            this.buildBodyPath();
+
+            // On trouve le point le plus éloigné du centre visuel pour que le dégradé s'étire parfaitement
+            let maxDist = this.baseRadius;
+            for (let pt of this.nodes) {
+                let d = Math.hypot(pt.x - visualX, pt.y - visualY);
+                if (d > maxDist) maxDist = d;
+            }
+
+            const safeVisualX = Number.isFinite(visualX) ? visualX : width * 0.5;
+            const safeVisualY = Number.isFinite(visualY) ? visualY : height * 0.5;
+            const safeBaseRadius = Number.isFinite(this.baseRadius) ? Math.max(8, this.baseRadius) : 50;
+            const safeMaxDist = Number.isFinite(maxDist) ? Math.max(safeBaseRadius * 0.6, maxDist) : safeBaseRadius;
+
+            let grad = ctx.createRadialGradient(
+                safeVisualX - safeBaseRadius * 0.2, safeVisualY - safeBaseRadius * 0.3, safeBaseRadius * 0.1, 
+                safeVisualX, safeVisualY, safeMaxDist * 1.2
+            );
+            grad.addColorStop(0, this.color);
+            grad.addColorStop(1, this.darkColor);
+            
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            ctx.save();
+            this.buildBodyPath();
+            ctx.clip();
+
+            ctx.fillStyle = this.highlightColor;
+            ctx.beginPath();
+            ctx.ellipse(
+                safeVisualX - safeBaseRadius * 0.3, safeVisualY - safeBaseRadius * 0.3, 
+                safeBaseRadius * 0.25, safeBaseRadius * 0.15, -Math.PI / 4, 0, Math.PI * 2
+            );
+            ctx.fill();
+
+            let dx = this.nodes[Math.floor(this.numNodes/4)].x - this.nodes[Math.floor(this.numNodes*0.75)].x;
+            let dy = this.nodes[Math.floor(this.numNodes/4)].y - this.nodes[Math.floor(this.numNodes*0.75)].y;
+            let currentRotation = Math.atan2(dy, dx) - Math.PI/2;
+
+            this.drawFace(currentRotation, visualX, visualY);
+            ctx.restore();
+
+            // Les accessoires restent libres, mais les éléments internes sont strictement confinés dans la peau.
+            this.drawAccessory(currentRotation, visualX, visualY);
+        }
+
+        drawAccessory(rotation, visualX, visualY) {
+            if (this.accessory === 'none' || !this.accessoryAttachment) return;
+
+            const attachment = this.accessoryAttachment;
+            const anchor = this.getSurfaceAnchorFromLocal(
+                attachment.localX,
+                attachment.localY,
+                visualX,
+                visualY,
+                rotation
+            );
+
+            const anchorX = anchor.x + anchor.normalX * attachment.skinOffset;
+            const anchorY = anchor.y + anchor.normalY * attachment.skinOffset;
+            const accessoryRotation = anchor.rotation + attachment.rotationOffset;
+            const accessoryScale = Math.max(0.8, this.baseRadius / 62) * (attachment.scaleBoost || 1) * this.accessorySizeBias;
+
+            ctx.save();
+            ctx.translate(anchorX, anchorY);
+            ctx.rotate(accessoryRotation);
+            ctx.scale(accessoryScale, accessoryScale);
+
+            if (this.accessory === 'bow') {
+                ctx.fillStyle = '#ff4d6d';
+                ctx.beginPath(); ctx.moveTo(0, 2); ctx.lineTo(-18, -10); ctx.lineTo(-14, 13); ctx.closePath(); ctx.fill();
+                ctx.beginPath(); ctx.moveTo(0, 2); ctx.lineTo(18, -10); ctx.lineTo(14, 13); ctx.closePath(); ctx.fill();
+                ctx.fillStyle = '#c9184a';
+                ctx.beginPath(); ctx.arc(0, 2, 5, 0, Math.PI * 2); ctx.fill();
+            } else if (this.accessory === 'leaf') {
+                ctx.strokeStyle = '#208b3a';
+                ctx.lineWidth = 2.2;
+                ctx.beginPath(); ctx.moveTo(-2, 2); ctx.lineTo(16, -16); ctx.stroke();
+                ctx.fillStyle = '#2dc653';
+                ctx.beginPath(); ctx.ellipse(14, -16, 18, 7, -Math.PI / 4, 0, Math.PI * 2); ctx.fill();
+            } else if (this.accessory === 'sprout') {
+                ctx.strokeStyle = '#1f7a1f';
+                ctx.lineWidth = 2.3;
+                ctx.beginPath(); ctx.moveTo(0, 4); ctx.quadraticCurveTo(0, -8, 0, -20); ctx.stroke();
+                ctx.fillStyle = '#52b788';
+                ctx.beginPath(); ctx.ellipse(-7, -16, 8, 4, -0.6, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(7, -16, 8, 4, 0.6, 0, Math.PI * 2); ctx.fill();
+            } else if (this.accessory === 'horns') {
+                ctx.fillStyle = '#e0e0e0';
+                ctx.beginPath();
+                ctx.moveTo(-10, 2);
+                ctx.quadraticCurveTo(-18, -14, -22, -30);
+                ctx.quadraticCurveTo(-8, -20, -3, -4);
+                ctx.closePath(); ctx.fill();
+                ctx.beginPath();
+                ctx.moveTo(10, 2);
+                ctx.quadraticCurveTo(18, -14, 22, -30);
+                ctx.quadraticCurveTo(8, -20, 3, -4);
+                ctx.closePath(); ctx.fill();
+            } else if (this.accessory === 'flower') {
+                for (let i = 0; i < 5; i++) {
+                    ctx.save();
+                    ctx.rotate((Math.PI * 2 * i) / 5);
+                    ctx.fillStyle = '#ff8fab';
+                    ctx.beginPath(); ctx.ellipse(0, -10, 5, 10, 0, 0, Math.PI * 2); ctx.fill();
+                    ctx.restore();
+                }
+                ctx.fillStyle = '#ffd166';
+                ctx.beginPath(); ctx.arc(0, 0, 5, 0, Math.PI * 2); ctx.fill();
+            } else if (this.accessory === 'star_pin') {
+                ctx.fillStyle = '#ffd166';
+                ctx.beginPath();
+                for (let i = 0; i < 5; i++) {
+                    const outerA = -Math.PI / 2 + i * (Math.PI * 2 / 5);
+                    const innerA = outerA + Math.PI / 5;
+                    const ox = Math.cos(outerA) * 12;
+                    const oy = Math.sin(outerA) * 12;
+                    const ix = Math.cos(innerA) * 5;
+                    const iy = Math.sin(innerA) * 5;
+                    if (i === 0) ctx.moveTo(ox, oy); else ctx.lineTo(ox, oy);
+                    ctx.lineTo(ix, iy);
+                }
+                ctx.closePath(); ctx.fill();
+            } else if (this.accessory === 'mushroom') {
+                ctx.fillStyle = '#f94144';
+                ctx.beginPath(); ctx.arc(0, -8, 14, Math.PI, 0); ctx.fill();
+                ctx.fillStyle = '#fff';
+                ctx.beginPath(); ctx.arc(-5, -9, 2.5, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.arc(4, -12, 2, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = '#f5e6cc';
+                ctx.fillRect(-3, -8, 6, 16);
+            } else if (this.accessory === 'crown') {
+                ctx.fillStyle = '#f4d35e';
+                ctx.beginPath();
+                ctx.moveTo(-16, 6);
+                ctx.lineTo(-12, -10);
+                ctx.lineTo(-4, 0);
+                ctx.lineTo(0, -14);
+                ctx.lineTo(4, 0);
+                ctx.lineTo(12, -10);
+                ctx.lineTo(16, 6);
+                ctx.closePath(); ctx.fill();
+            } else if (this.accessory === 'spikes') {
+                ctx.fillStyle = '#ced4da';
+                [-18, -6, 6, 18].forEach(offset => {
+                    ctx.beginPath();
+                    ctx.moveTo(offset - 5, 4);
+                    ctx.lineTo(offset, -16);
+                    ctx.lineTo(offset + 5, 4);
+                    ctx.closePath();
+                    ctx.fill();
+                });
+            } else if (this.accessory === 'antenna') {
+                ctx.strokeStyle = '#d90429';
+                ctx.lineWidth = 2.3;
+                ctx.beginPath(); ctx.moveTo(0, 5); ctx.quadraticCurveTo(4, -10, 0, -24); ctx.stroke();
+                ctx.fillStyle = '#ff4d6d';
+                ctx.beginPath(); ctx.arc(0, -26, 5, 0, Math.PI * 2); ctx.fill();
+            } else if (this.accessory === 'halo') {
+                ctx.strokeStyle = 'rgba(255, 220, 120, 0.95)';
+                ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.ellipse(0, -18, 16, 6, 0, 0, Math.PI * 2); ctx.stroke();
+            } else if (this.accessory === 'broken_halo') {
+                ctx.strokeStyle = 'rgba(210, 210, 210, 0.9)';
+                ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.arc(0, -18, 16, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+                ctx.beginPath(); ctx.arc(0, -18, 16, Math.PI * 1.1, Math.PI * 1.75); ctx.stroke();
+            } else if (this.accessory === 'clover') {
+                ctx.fillStyle = '#52b788';
+                [[-4,-8],[4,-8],[-4,0],[4,0]].forEach(([x,y]) => { ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill(); });
+                ctx.strokeStyle = '#2d6a4f';
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(0, 2); ctx.quadraticCurveTo(3, 10, 8, 14); ctx.stroke();
+            } else if (this.accessory === 'feather') {
+                ctx.fillStyle = '#e9edc9';
+                ctx.beginPath();
+                ctx.moveTo(-2, 10); ctx.quadraticCurveTo(10, -2, 4, -18); ctx.quadraticCurveTo(-6, -8, -2, 10);
+                ctx.fill();
+                ctx.strokeStyle = '#a3b18a';
+                ctx.lineWidth = 1.6;
+                ctx.beginPath(); ctx.moveTo(-1, 8); ctx.lineTo(4, -16); ctx.stroke();
+            } else if (this.accessory === 'shell_pin') {
+                ctx.fillStyle = '#ffd6a5';
+                ctx.beginPath(); ctx.arc(0, 0, 10, Math.PI, 0); ctx.fill();
+                ctx.strokeStyle = '#e5989b';
+                ctx.lineWidth = 1.5;
+                [-6, -2, 2, 6].forEach(x => { ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(x, -8); ctx.stroke(); });
+            } else if (this.accessory === 'bone_pin') {
+                ctx.strokeStyle = '#f1f3f5';
+                ctx.lineWidth = 4;
+                ctx.beginPath(); ctx.moveTo(-9, 9); ctx.lineTo(9, -9); ctx.stroke();
+                [[-10,10],[-6,6],[10,-10],[6,-6]].forEach(([x,y]) => { ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#f8f9fa'; ctx.fill(); });
+            }
+
+            ctx.restore();
+        }
+
+        drawFace(rotation, visualX, visualY) {
+            const frame = this.getBodyFrame(visualX, visualY, rotation);
+            const faceAnchorY = Math.max(frame.minY * 0.18, -this.baseRadius * 0.08);
+            const faceWidth = Math.max(18, Math.min(Math.abs(frame.minX), Math.abs(frame.maxX)) * 1.35 * this.faceScale);
+            const faceHeight = Math.max(14, (frame.maxY - frame.minY) * 0.24 * this.faceScale);
+
+            ctx.save();
+            ctx.translate(visualX, visualY);
+            ctx.rotate(rotation);
+            ctx.translate(0, faceAnchorY + this.mouthOffsetY * 0.15);
+
+            let vx = this.visualCenterX - this.prevVisualCenterX;
+            let vy = this.visualCenterY - this.prevVisualCenterY;
+
+            let targetLookX = vx * 0.52;
+            let targetLookY = vy * 0.52;
+
+            if (this.draggedNode) {
+                targetLookX = (this.dragX - visualX) * 0.3;
+                targetLookY = (this.dragY - visualY) * 0.3;
+            }
+
+            let moodLookBiasX = 0;
+            let moodLookBiasY = 0;
+            if (this.mood === 'sleepy') moodLookBiasY = 1.5;
+            if (this.mood === 'curious') moodLookBiasY = -1.5;
+            if (this.mood === 'mischief') moodLookBiasX = 1.2;
+            if (this.mood === 'grumpy') moodLookBiasY = 0.8;
+
+            targetLookX += moodLookBiasX;
+            targetLookY += moodLookBiasY;
+
+            let lookDist = Math.hypot(targetLookX, targetLookY);
+            let lookAngle = Math.atan2(targetLookY, targetLookX) - rotation;
+            targetLookX = Math.cos(lookAngle) * lookDist;
+            targetLookY = Math.sin(lookAngle) * lookDist;
+
+            let maxLookX = Math.max(4.5, faceWidth * 0.085);
+            let maxLookY = Math.max(4, faceHeight * 0.13);
+            targetLookX = Math.max(-maxLookX, Math.min(maxLookX, targetLookX));
+            targetLookY = Math.max(-maxLookY, Math.min(maxLookY, targetLookY));
+
+            ctx.translate(targetLookX, targetLookY);
+
+            if (Date.now() > this.nextBlink) {
+                this.isBlinking = true;
+                this.nextBlink = Date.now() + 150 + Math.random() * 50;
+            }
+            if (this.isBlinking && Date.now() > this.nextBlink) {
+                this.isBlinking = false;
+                this.nextBlink = Date.now() + 2000 + Math.random() * 4000;
+            }
+
+            const eyeColor = this.type === 'scary' ? '#1a0000' : '#101010';
+            const eyeDist = Math.min(faceWidth * (0.72 + this.eyeSpacingBias * 0.22), this.baseRadius * 0.46);
+            let eyeSize = this.type === 'cute' ? 7 : (this.type === 'scary' ? 4.5 : 5.4);
+            eyeSize = Math.min(eyeSize * (1 + this.eyeSizeBias * 0.5), Math.max(4, faceHeight * 0.34));
+            eyeSize = Math.max(3.2, eyeSize);
+
+            if ((this.type === 'cute' || this.detailTrait === 'blush') && !this.isBlinking) {
+                ctx.fillStyle = 'rgba(255, 105, 180, 0.22)';
+                ctx.beginPath(); ctx.ellipse(-eyeDist / 2 - 5, eyeSize + 1, 4 + this.cheekIntensity * 3, 2.4 + this.cheekIntensity, 0, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(eyeDist / 2 + 5, eyeSize + 1, 4 + this.cheekIntensity * 3, 2.4 + this.cheekIntensity, 0, 0, Math.PI * 2); ctx.fill();
+            }
+
+            if (this.detailTrait === 'freckles') {
+                ctx.fillStyle = 'rgba(60, 20, 20, 0.35)';
+                [-10, -6, 6, 10].forEach((x, idx) => {
+                    ctx.beginPath();
+                    ctx.arc(x, 9 + (idx % 2), 1.2, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            } else if (this.detailTrait === 'brow') {
+                ctx.strokeStyle = 'rgba(20, 20, 20, 0.75)';
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(-eyeDist / 2 - 5, -eyeSize - 6); ctx.lineTo(-eyeDist / 2 + 4, -eyeSize - 8); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - 4, -eyeSize - 8); ctx.lineTo(eyeDist / 2 + 5, -eyeSize - 6); ctx.stroke();
+            } else if (this.detailTrait === 'speckles') {
+                ctx.fillStyle = 'rgba(255,255,255,0.18)';
+                [-12, -4, 7, 13].forEach((x, idx) => {
+                    ctx.beginPath();
+                    ctx.arc(x, -10 + idx, 1.5, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            }
+
+            if (this.detailTrait === 'lashes') {
+                ctx.strokeStyle = 'rgba(20, 20, 20, 0.65)';
+                ctx.lineWidth = 1.4;
+                [-1, 1].forEach(side => {
+                    const ex = side * eyeDist / 2;
+                    ctx.beginPath(); ctx.moveTo(ex - 2 * side, -eyeSize - 1); ctx.lineTo(ex - 7 * side, -eyeSize - 6); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(ex, -eyeSize - 2); ctx.lineTo(ex, -eyeSize - 8); ctx.stroke();
+                    ctx.beginPath(); ctx.moveTo(ex + 2 * side, -eyeSize - 1); ctx.lineTo(ex + 7 * side, -eyeSize - 6); ctx.stroke();
+                });
+            } else if (this.detailTrait === 'under_eyes') {
+                ctx.strokeStyle = 'rgba(60, 60, 90, 0.22)';
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.arc(-eyeDist / 2, eyeSize + 3, eyeSize + 2, 0.2, Math.PI - 0.2); ctx.stroke();
+                ctx.beginPath(); ctx.arc(eyeDist / 2, eyeSize + 3, eyeSize + 2, 0.2, Math.PI - 0.2); ctx.stroke();
+            } else if (this.detailTrait === 'cheek_marks') {
+                ctx.strokeStyle = 'rgba(255,255,255,0.24)';
+                ctx.lineWidth = 1.6;
+                [-1, 1].forEach(side => {
+                    const baseX = side * (eyeDist / 2 + 8);
+                    for (let i = 0; i < 3; i++) {
+                        ctx.beginPath(); ctx.moveTo(baseX, 6 + i * 3); ctx.lineTo(baseX + side * 4, 6 + i * 3); ctx.stroke();
+                    }
+                });
+            }
+
+            ctx.fillStyle = eyeColor;
+            ctx.strokeStyle = eyeColor;
+            ctx.lineWidth = 2.4;
+
+            const drawOpenRoundEye = (x, y, r, withSparkle = false) => {
+                ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+                if (withSparkle) {
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath(); ctx.arc(x - r * 0.35, y - r * 0.35, Math.max(1.8, r * 0.3), 0, Math.PI * 2); ctx.fill();
+                    ctx.fillStyle = eyeColor;
+                }
+            };
+
+            if (this.isBlinking) {
+                ctx.beginPath(); ctx.moveTo(-eyeDist/2 - eyeSize, 0); ctx.lineTo(-eyeDist/2 + eyeSize, 0); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist/2 - eyeSize, 0); ctx.lineTo(eyeDist/2 + eyeSize, 0); ctx.stroke();
+            } else if (this.eyeStyle === 'dot') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize);
+                drawOpenRoundEye(eyeDist / 2, 0, eyeSize);
+            } else if (this.eyeStyle === 'sparkle') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize + 0.8, true);
+                drawOpenRoundEye(eyeDist / 2, 0, eyeSize + 0.8, true);
+            } else if (this.eyeStyle === 'big_round') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize + 1.8, this.type !== 'scary');
+                drawOpenRoundEye(eyeDist / 2, 0, eyeSize + 1.8, this.type !== 'scary');
+            } else if (this.eyeStyle === 'sleepy') {
+                ctx.lineWidth = 2.8;
+                ctx.beginPath(); ctx.moveTo(-eyeDist / 2 - eyeSize, 1); ctx.quadraticCurveTo(-eyeDist / 2, -2, -eyeDist / 2 + eyeSize, 1); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - eyeSize, 1); ctx.quadraticCurveTo(eyeDist / 2, -2, eyeDist / 2 + eyeSize, 1); ctx.stroke();
+            } else if (this.eyeStyle === 'happy_arc') {
+                ctx.lineWidth = 2.8;
+                ctx.beginPath(); ctx.moveTo(-eyeDist / 2 - eyeSize, 2); ctx.quadraticCurveTo(-eyeDist / 2, eyeSize + 2, -eyeDist / 2 + eyeSize, 2); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - eyeSize, 2); ctx.quadraticCurveTo(eyeDist / 2, eyeSize + 2, eyeDist / 2 + eyeSize, 2); ctx.stroke();
+            } else if (this.eyeStyle === 'wide') {
+                ctx.beginPath(); ctx.ellipse(-eyeDist / 2, 0, eyeSize + 3, eyeSize, 0, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(eyeDist / 2, 0, eyeSize + 3, eyeSize, 0, 0, Math.PI * 2); ctx.fill();
+            } else if (this.eyeStyle === 'wink') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize + 0.5, true);
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - eyeSize, 0); ctx.lineTo(eyeDist / 2 + eyeSize, 0); ctx.stroke();
+            } else if (this.eyeStyle === 'heart') {
+                const drawHeartEye = (x) => {
+                    ctx.beginPath();
+                    ctx.moveTo(x, eyeSize * 0.8);
+                    ctx.bezierCurveTo(x - eyeSize * 1.2, -eyeSize * 0.4, x - eyeSize * 0.9, -eyeSize * 1.2, x, -eyeSize * 0.2);
+                    ctx.bezierCurveTo(x + eyeSize * 0.9, -eyeSize * 1.2, x + eyeSize * 1.2, -eyeSize * 0.4, x, eyeSize * 0.8);
+                    ctx.fill();
+                };
+                drawHeartEye(-eyeDist / 2);
+                drawHeartEye(eyeDist / 2);
+            } else if (this.eyeStyle === 'droplet') {
+                const drawDroplet = (x) => {
+                    ctx.beginPath();
+                    ctx.moveTo(x, -eyeSize - 2);
+                    ctx.quadraticCurveTo(x - eyeSize, -1, x, eyeSize + 2);
+                    ctx.quadraticCurveTo(x + eyeSize, -1, x, -eyeSize - 2);
+                    ctx.fill();
+                };
+                drawDroplet(-eyeDist / 2);
+                drawDroplet(eyeDist / 2);
+            } else if (this.eyeStyle === 'half_lid') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize + 0.6, this.type !== 'scary');
+                drawOpenRoundEye(eyeDist / 2, 0, eyeSize + 0.6, this.type !== 'scary');
+                ctx.strokeStyle = 'rgba(20,20,20,0.75)';
+                ctx.lineWidth = 2.2;
+                ctx.beginPath(); ctx.moveTo(-eyeDist / 2 - eyeSize, -1); ctx.quadraticCurveTo(-eyeDist / 2, -eyeSize - 1, -eyeDist / 2 + eyeSize, -1); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - eyeSize, -1); ctx.quadraticCurveTo(eyeDist / 2, -eyeSize - 1, eyeDist / 2 + eyeSize, -1); ctx.stroke();
+                ctx.strokeStyle = eyeColor;
+            } else if (this.eyeStyle === 'uneven') {
+                drawOpenRoundEye(-eyeDist / 2, 0, eyeSize + 1.6, true);
+                drawOpenRoundEye(eyeDist / 2, 1, Math.max(2.5, eyeSize - 1.4), false);
+            } else if (this.eyeStyle === 'slit') {
+                ctx.beginPath(); ctx.ellipse(-eyeDist / 2, 0, eyeSize + 3, Math.max(1.8, eyeSize * 0.38), Math.PI / 8, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.ellipse(eyeDist / 2, 0, eyeSize + 3, Math.max(1.8, eyeSize * 0.38), -Math.PI / 8, 0, Math.PI * 2); ctx.fill();
+            } else if (this.eyeStyle === 'angry_arc') {
+                ctx.lineWidth = 3;
+                ctx.beginPath(); ctx.moveTo(-eyeDist / 2 - eyeSize, 2); ctx.lineTo(-eyeDist / 2 + eyeSize, -2); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(eyeDist / 2 - eyeSize, -2); ctx.lineTo(eyeDist / 2 + eyeSize, 2); ctx.stroke();
+            } else if (this.eyeStyle === 'spiral') {
+                const spiral = (x, direction) => {
+                    ctx.beginPath();
+                    for (let i = 0; i < 18; i++) {
+                        const t = i / 17;
+                        const ang = t * Math.PI * 3 * direction;
+                        const r = t * (eyeSize + 2);
+                        const px = x + Math.cos(ang) * r;
+                        const py = Math.sin(ang) * r;
+                        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                    }
+                    ctx.stroke();
+                };
+                ctx.lineWidth = 1.8;
+                spiral(-eyeDist / 2, 1);
+                spiral(eyeDist / 2, -1);
+                ctx.lineWidth = 2.4;
+            } else if (this.eyeStyle === 'void') {
+                ctx.beginPath(); ctx.arc(-eyeDist / 2, 0, eyeSize + 2.2, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.arc(eyeDist / 2, 0, eyeSize + 2.2, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                ctx.beginPath(); ctx.arc(-eyeDist / 2 - 2, -2, 1.6, 0, Math.PI * 2); ctx.fill();
+                ctx.beginPath(); ctx.arc(eyeDist / 2 - 2, -2, 1.6, 0, Math.PI * 2); ctx.fill();
+                ctx.fillStyle = eyeColor;
+            }
+
+            const mouthY = 9 + this.mouthOffsetY;
+            ctx.beginPath();
+            if (this.mouthStyle === 'smile') {
+                ctx.moveTo(-5, mouthY - 1); ctx.quadraticCurveTo(0, mouthY + 5, 5, mouthY - 1);
+            } else if (this.mouthStyle === 'cat') {
+                ctx.moveTo(-5, mouthY - 1); ctx.quadraticCurveTo(-2.5, mouthY + 4, 0, mouthY - 1); ctx.quadraticCurveTo(2.5, mouthY + 4, 5, mouthY - 1);
+            } else if (this.mouthStyle === 'tiny_o') {
+                ctx.ellipse(0, mouthY, 3, 4, 0, 0, Math.PI * 2);
+            } else if (this.mouthStyle === 'grin') {
+                ctx.moveTo(-7, mouthY); ctx.quadraticCurveTo(0, mouthY + 7, 7, mouthY);
+            } else if (this.mouthStyle === 'smirk') {
+                ctx.moveTo(-4, mouthY); ctx.quadraticCurveTo(2, mouthY + 3, 7, mouthY - 2);
+            } else if (this.mouthStyle === 'flat') {
+                ctx.moveTo(-5, mouthY); ctx.lineTo(5, mouthY);
+            } else if (this.mouthStyle === 'fangs') {
+                ctx.moveTo(-7, mouthY - 2); ctx.lineTo(-3, mouthY + 2); ctx.lineTo(0, mouthY - 2); ctx.lineTo(3, mouthY + 2); ctx.lineTo(7, mouthY - 2);
+            } else if (this.mouthStyle === 'zigzag') {
+                ctx.moveTo(-7, mouthY); ctx.lineTo(-3, mouthY - 4); ctx.lineTo(0, mouthY); ctx.lineTo(3, mouthY - 4); ctx.lineTo(7, mouthY);
+            } else if (this.mouthStyle === 'open_smile') {
+                ctx.moveTo(-6, mouthY - 1); ctx.quadraticCurveTo(0, mouthY + 7, 6, mouthY - 1);
+                ctx.moveTo(-4, mouthY + 1); ctx.quadraticCurveTo(0, mouthY + 4, 4, mouthY + 1);
+            } else if (this.mouthStyle === 'pout') {
+                ctx.moveTo(-4, mouthY + 1); ctx.quadraticCurveTo(0, mouthY + 4, 4, mouthY + 1);
+                ctx.moveTo(-2, mouthY + 1); ctx.quadraticCurveTo(0, mouthY - 1, 2, mouthY + 1);
+            } else if (this.mouthStyle === 'tiny_frown') {
+                ctx.moveTo(-4, mouthY + 2); ctx.quadraticCurveTo(0, mouthY - 1, 4, mouthY + 2);
+            } else if (this.mouthStyle === 'toothy') {
+                ctx.rect(-6, mouthY - 2, 12, 6);
+                ctx.moveTo(-2, mouthY - 2); ctx.lineTo(-2, mouthY + 4);
+                ctx.moveTo(2, mouthY - 2); ctx.lineTo(2, mouthY + 4);
+            } else if (this.mouthStyle === 'squiggle') {
+                ctx.moveTo(-7, mouthY); ctx.quadraticCurveTo(-4, mouthY - 3, -1, mouthY); ctx.quadraticCurveTo(2, mouthY + 3, 5, mouthY); ctx.quadraticCurveTo(6, mouthY - 1, 7, mouthY);
+            } else {
+                ctx.moveTo(-4, mouthY); ctx.quadraticCurveTo(0, mouthY + 4, 4, mouthY);
+            }
+            ctx.stroke();
+
+            if (this.detailTrait === 'shine_plus') {
+                ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath(); ctx.moveTo(-faceWidth * 0.35, -faceHeight * 0.8); ctx.lineTo(-faceWidth * 0.25, -faceHeight * 0.8); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(-faceWidth * 0.3, -faceHeight * 0.9); ctx.lineTo(-faceWidth * 0.3, -faceHeight * 0.7); ctx.stroke();
+            }
+
+            ctx.restore();
+        }
+
+        checkGrab(x, y) {
+            let minDist = Infinity;
+            let closestNode = null;
+            for (let pt of this.nodes) {
+                let d = Math.hypot(pt.x - x, pt.y - y);
+                if (d < minDist) {
+                    minDist = d;
+                    closestNode = pt;
+                }
+            }
+            
+            if (minDist < this.baseRadius * 1.5) {
+                this.draggedNode = closestNode;
+                this.dragX = x;
+                this.dragY = y;
+            }
+        }
+
+        updateGrab(x, y) {
+            if (this.draggedNode) {
+                this.dragX = x;
+                this.dragY = y;
+            }
+        }
+
+        releaseGrab() {
+            this.draggedNode = null;
+        }
+
+        explode() {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.fillRect(0, 0, width, height);
+
+            for (let i = 0; i < 40; i++) {
+                let sourceNode = this.nodes[Math.floor(Math.random() * this.nodes.length)];
+                particles.push(new Particle(sourceNode.x, sourceNode.y, this.color));
+            }
+            currentSlime = new Slime();
+        }
+    }
+
+    function getPointerPos(e) {
+        if (e.touches && e.touches.length > 0) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+        return { x: e.clientX, y: e.clientY };
+    }
+
+    window.addEventListener('mousedown', (e) => { if (currentSlime) currentSlime.checkGrab(getPointerPos(e).x, getPointerPos(e).y); });
+    window.addEventListener('mousemove', (e) => { if (currentSlime) currentSlime.updateGrab(getPointerPos(e).x, getPointerPos(e).y); });
+    window.addEventListener('mouseup', () => { if (currentSlime) currentSlime.releaseGrab(); });
+    window.addEventListener('mouseleave', () => { if (currentSlime) currentSlime.releaseGrab(); }); 
+
+    window.addEventListener('touchstart', (e) => { if (currentSlime) currentSlime.checkGrab(getPointerPos(e).x, getPointerPos(e).y); }, { passive: false });
+    window.addEventListener('touchmove', (e) => { e.preventDefault(); if (currentSlime) currentSlime.updateGrab(getPointerPos(e).x, getPointerPos(e).y); }, { passive: false });
+    window.addEventListener('touchend', () => { if (currentSlime) currentSlime.releaseGrab(); });
+    window.addEventListener('touchcancel', () => { if (currentSlime) currentSlime.releaseGrab(); });
+
+    let currentSlime = new Slime();
+
+    function gameLoop() {
+        ctx.clearRect(0, 0, width, height);
+
+        if (currentSlime) {
+            currentSlime.update();
+            currentSlime.drawContainmentBox();
+            currentSlime.draw();
+
+        }
+
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.update();
+            p.draw();
+            if (p.life <= 0) particles.splice(i, 1);
+        }
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    gameLoop();
+</script>
+</body>
+</html>

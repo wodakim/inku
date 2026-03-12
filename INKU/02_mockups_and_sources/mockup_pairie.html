@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Terrarium Interactif</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden; 
+            background-color: #000; 
+            touch-action: none; /* Crucial pour empêcher le défilement mobile pendant le lancer */
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        
+        /* --- UI (Interface Utilisateur) --- */
+        #labButton {
+            position: absolute;
+            top: 50%; /* Placement au milieu verticalement */
+            right: 0; /* Collé à l'arête droite */
+            transform: translateY(-50%); /* Centrage vertical parfait par rapport à sa propre taille */
+            background-color: rgba(255, 255, 255, 0.95);
+            color: #15803d; /* Vert forêt pour rappeler la nature */
+            border: 2px solid #4ade80; 
+            border-right: none; /* Retire la bordure du côté collé à l'écran */
+            padding: 12px 15px 12px 20px;
+            border-radius: 30px 0 0 30px; /* Arrondis uniquement à gauche (façon languette) */
+            font-family: system-ui, -apple-system, sans-serif;
+            font-weight: 800;
+            font-size: 16px;
+            box-shadow: -4px 4px 12px rgba(0, 0, 0, 0.2); /* L'ombre est projetée vers la gauche */
+            cursor: pointer;
+            z-index: 10; /* S'assure qu'il est au-dessus du jeu */
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: transform 0.1s ease, background-color 0.2s ease;
+            user-select: none; /* Évite la sélection du texte au toucher */
+            -webkit-tap-highlight-color: transparent; /* Retire le flash bleu natif des mobiles */
+            transform-origin: right center; /* L'animation se fera par rapport au bord droit */
+        }
+
+        #labButton:active {
+            transform: translateY(-50%) scale(0.95); /* Garde le bouton centré pendant qu'il rétrécit au clic */
+            background-color: #f0fdf4;
+        }
+    </style>
+</head>
+<body>
+
+<!-- Interface par-dessus le jeu -->
+<button id="labButton">🧪 Labo</button>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // --- DONNÉES DU DÉCOR ---
+    // Les hitboxes sont désormais des définitions géométriques exactes (AABB rectangulaires ou cercles)
+    // correspondant pixel pour pixel aux dessins vectoriels. (w = largeur, d = profondeur, h = hauteur, ox/oz = décalage du centre)
+    const obstacles = [
+        // Arbres ramenés au moyen-plan (y: 0.55 / 0.62) pour être bien ancrés sur l'herbe et ne plus flotter sur l'horizon
+        { type: 'tree', x: 0.20, y: 0.55, size: 0.22, bounceMult: 0.8, shape: 'rect', w: 0.3, d: 0.2, h: 2.0, ox: 0, oz: 0 },
+        { type: 'tree', x: 0.85, y: 0.62, size: 0.18, bounceMult: 0.8, shape: 'rect', w: 0.3, d: 0.2, h: 2.0, ox: 0, oz: 0 },
+        { type: 'tree', x: 0.08, y: 0.48, size: 0.12, bounceMult: 0.8, shape: 'rect', w: 0.3, d: 0.2, h: 2.0, ox: 0, oz: 0 }, // Petit arbre lointain
+        
+        // Buissons, rochers et rondins rééquilibrés autour des arbres
+        { type: 'rock', x: 0.35, y: 0.68, size: 0.10, bounceMult: 0.6, shape: 'rect', w: 1.8, d: 0.4, h: 1.0, ox: -0.1, oz: 0 },
+        { type: 'rock', x: 0.78, y: 0.78, size: 0.08, bounceMult: 0.6, shape: 'rect', w: 1.8, d: 0.4, h: 1.0, ox: -0.1, oz: 0 },
+        { type: 'bush', x: 0.52, y: 0.58, size: 0.11, bounceMult: 0.4, shape: 'circle', r: 0.6, h: 1.0, ox: 0, oz: 0 },
+        { type: 'bush', x: 0.15, y: 0.85, size: 0.14, bounceMult: 0.4, shape: 'circle', r: 0.6, h: 1.0, ox: 0, oz: 0 },
+        { type: 'log',  x: 0.65, y: 0.88, size: 0.13, bounceMult: 0.5, shape: 'rect', w: 2.0, d: 0.4, h: 0.5, ox: 0, oz: 0 }
+    ];
+
+    const groundPhysics = {
+        start: { x: 0.0, y: 0.42 },
+        control: { x: 0.5, y: 0.38 },
+        end: { x: 1.0, y: 0.45 },
+        getBoundaryY: function(xPercent) {
+            const t = Math.max(0, Math.min(1, xPercent));
+            return Math.pow(1 - t, 2) * this.start.y + 
+                   2 * (1 - t) * t * this.control.y + 
+                   Math.pow(t, 2) * this.end.y;
+        }
+    };
+
+    // --- MOTEUR PHYSIQUE & BALLE ---
+    const ball = {
+        x: 0.5,       // Position Horizontale (0 à 1)
+        y: 0.0,       // Hauteur au-dessus du sol (0 = posé)
+        z: 0.9,       // Profondeur (0.42 = horizon, 1.0 = premier plan)
+        vx: 0,        // Vélocité X
+        vy: 0,        // Vélocité Hauteur
+        vz: 0,        // Vélocité Profondeur
+        radius: 0.04, // Taille de base
+        isDragging: false,
+        color: '#ef4444' // Rouge vibrant
+    };
+
+    // Constantes physiques
+    const GRAVITY = 0.0035;      // Gravité augmentée
+    const RETURN_FORCE = 0.00015; // Force de retour considérablement réduite (roule plus lentement)
+    const BOUNCE_FLOOR = 0.65;   // Rebond sur le sol
+    const FRICTION = 0.95;       // Ralentissement au sol (légèrement plus fort)
+    
+    // Gestion des entrées (Tactile & Souris)
+    const pointer = { x: 0, y: 0, isDown: false, history: [] };
+
+    // --- FONCTION DE PROJECTION (Perspective & Hauteur du sol) ---
+    function getScreenCoords(obj, w, h, isBall = false) {
+        const abstractZ = isBall ? obj.z : obj.y; 
+        const horizonZ = groundPhysics.getBoundaryY(obj.x);
+        
+        // Ratio de profondeur (0 = fond de l'écran, 1 = tout devant)
+        const depthRatio = Math.max(0, Math.min(1, (abstractZ - horizonZ) / (1.0 - horizonZ)));
+        
+        // Rendre la profondeur non linéaire : compresse le fond pour que l'objet paraisse plus lent à distance
+        const visualDepth = Math.pow(depthRatio, 1.4); 
+        
+        // Coordonnées de la bordure avant surélevée (laissant la place à la terre en dessous)
+        const frontEdgeY = 0.82; 
+        const frontControlY = 0.86;
+        const t = obj.x;
+        const currentFrontY = Math.pow(1-t, 2)*frontEdgeY + 2*(1-t)*t*frontControlY + Math.pow(t, 2)*frontEdgeY;
+        
+        const pz = (horizonZ + visualDepth * (currentFrontY - horizonZ)) * h;
+        const px = obj.x * w;
+        
+        // L'échelle de l'objet diminue selon sa distance
+        const scale = 0.35 + 0.65 * visualDepth; 
+        
+        return { px, pz, scale };
+    }
+
+    // --- LOGIQUE DE MISE À JOUR (60 FPS) ---
+    function updatePhysics() {
+        if (ball.isDragging) {
+            // La balle suit le doigt/souris horizontalement
+            ball.x = Math.max(0, Math.min(1, pointer.x / canvas.width));
+            
+            // Calculer la hauteur visuelle adaptée à la nouvelle perspective
+            const { pz, scale } = getScreenCoords(ball, canvas.width, canvas.height, true);
+            const targetY = (pz - pointer.y) / (canvas.height * scale);
+            ball.y = Math.max(0, targetY);
+            return; // On ne fait pas le reste de la physique si on tient la balle
+        }
+
+        // 1. Appliquer les forces
+        ball.vy -= GRAVITY; // Tombe
+        
+        // Pente du terrain : ramène vers l'avant (z = 1)
+        if (ball.y <= 0) {
+            ball.vz += RETURN_FORCE; // Roule plus vite au sol
+        } else {
+            ball.vz += RETURN_FORCE * 0.3; // Légère influence dans l'air
+        }
+
+        // 2. Mouvement
+        ball.x += ball.vx;
+        ball.y += ball.vy;
+        ball.z += ball.vz;
+
+        // 3. Contraintes des Murs et du Sol
+        const horizonZ = groundPhysics.getBoundaryY(ball.x);
+        
+        // Rebond au fond (horizon)
+        if (ball.z < horizonZ) {
+            ball.z = horizonZ;
+            ball.vz *= -BOUNCE_FLOOR;
+        }
+        // Rebond sur l'écran avant
+        if (ball.z > 1.0) {
+            ball.z = 1.0;
+            ball.vz *= -BOUNCE_FLOOR;
+        }
+        
+        // Bords gauche/droite
+        if (ball.x < 0) { ball.x = 0; ball.vx *= -BOUNCE_FLOOR; }
+        if (ball.x > 1) { ball.x = 1; ball.vx *= -BOUNCE_FLOOR; }
+
+        // Rebond sur le sol
+        if (ball.y < 0) {
+            ball.y = 0;
+            if (Math.abs(ball.vy) > 0.005) {
+                ball.vy *= -BOUNCE_FLOOR; // Rebondit
+            } else {
+                ball.vy = 0; // S'arrête de sautiller
+            }
+            // Friction quand elle roule
+            ball.vx *= FRICTION;
+            ball.vz *= FRICTION;
+        }
+
+        // 4. Collisions Vectorielles Pures (Depuis Zéro)
+        // On convertit les coordonnées dans un repère physique unifié basé sur baseSize (pour contrer la déformation du ratio de l'écran)
+        const baseSize = Math.min(canvas.width, canvas.height);
+        const ratioX = canvas.width / baseSize;
+        const ratioZ = canvas.height / baseSize;
+
+        let bx = ball.x * ratioX;
+        let bz = ball.z * ratioZ;
+        const by = ball.y * ratioZ; // Hauteur physique stricte
+        const br = ball.radius; // Déjà proportionnel à baseSize
+
+        let bvx = ball.vx * ratioX;
+        let bvz = ball.vz * ratioZ;
+
+        obstacles.forEach(obs => {
+            // Check de la hauteur (la balle vole-t-elle au-dessus des vecteurs de l'objet ?)
+            if (by > obs.size * obs.h) return;
+
+            const ox = obs.x * ratioX;
+            const oz = obs.y * ratioZ; // y est la profondeur Z dans ce tableau
+            const oSize = obs.size;
+
+            if (obs.shape === 'rect') {
+                // AABB (Axis-Aligned Bounding Box) vs Cercle
+                const hw = (obs.w * oSize) / 2;
+                const hd = (obs.d * oSize) / 2;
+                const cx = ox + (obs.ox * oSize);
+                const cz = oz + (obs.oz * oSize);
+
+                // Trouver le point géométrique le plus proche sur le bord du rectangle
+                const testX = Math.max(cx - hw, Math.min(bx, cx + hw));
+                const testZ = Math.max(cz - hd, Math.min(bz, cz + hd));
+
+                const distX = bx - testX;
+                const distZ = bz - testZ;
+                const distance = Math.hypot(distX, distZ);
+
+                if (distance < br) {
+                    // RÉSOLUTION DE COLLISION EXACTE
+                    if (distance === 0) {
+                        bz += br; // Glitch fallback
+                    } else {
+                        const push = br - distance;
+                        const nx = distX / distance;
+                        const nz = distZ / distance;
+
+                        // Repousse physique vectorielle
+                        bx += nx * push;
+                        bz += nz * push;
+
+                        // Rebond mathématique pur (Vecteur Normal)
+                        const dot = bvx * nx + bvz * nz;
+                        bvx = (bvx - 2 * dot * nx) * obs.bounceMult;
+                        bvz = (bvz - 2 * dot * nz) * obs.bounceMult;
+                    }
+                }
+            } else if (obs.shape === 'circle') {
+                // Cercle vs Cercle
+                const cx = ox + (obs.ox * oSize);
+                const cz = oz + (obs.oz * oSize);
+                const cr = obs.r * oSize;
+
+                const distX = bx - cx;
+                const distZ = bz - cz;
+                const distance = Math.hypot(distX, distZ);
+
+                if (distance < br + cr) {
+                    if (distance === 0) {
+                        bz += br;
+                    } else {
+                        const push = (br + cr) - distance;
+                        const nx = distX / distance;
+                        const nz = distZ / distance;
+
+                        bx += nx * push;
+                        bz += nz * push;
+
+                        const dot = bvx * nx + bvz * nz;
+                        bvx = (bvx - 2 * dot * nx) * obs.bounceMult;
+                        bvz = (bvz - 2 * dot * nz) * obs.bounceMult;
+                    }
+                }
+            }
+        });
+
+        // Réappliquer au référentiel relatif de l'écran (0 à 1)
+        ball.x = bx / ratioX;
+        ball.z = bz / ratioZ;
+        ball.vx = bvx / ratioX;
+        ball.vz = bvz / ratioZ;
+    }
+
+    // --- DESSIN (RENDU GRAPHIC) ---
+    function drawScene() {
+        const w = canvas.width;
+        const h = canvas.height;
+        const baseSize = Math.min(w, h);
+
+        // Nettoyage et dessin de base
+        ctx.clearRect(0, 0, w, h);
+
+        // 1. Ciel (Dégradé plus riche et profond avec effet de brume à l'horizon)
+        const skyGradient = ctx.createLinearGradient(0, 0, 0, h * 0.45);
+        skyGradient.addColorStop(0, '#1e3a8a');   // Bleu profond au zénith
+        skyGradient.addColorStop(0.4, '#3b82f6'); // Bleu vif
+        skyGradient.addColorStop(1, '#bae6fd');   // Bleu très clair/blanc à l'horizon
+        ctx.fillStyle = skyGradient;
+        ctx.fillRect(0, 0, w, h);
+
+        // 2. Soleil (Avec un véritable effet de halo lumineux)
+        const sunX = w * 0.8;
+        const sunY = h * 0.18;
+        const sunR = baseSize * 0.08;
+
+        // Halo lumineux externe (Aura immense)
+        const sunGlow = ctx.createRadialGradient(sunX, sunY, sunR * 0.1, sunX, sunY, sunR * 4);
+        sunGlow.addColorStop(0, 'rgba(253, 224, 71, 0.8)');
+        sunGlow.addColorStop(0.2, 'rgba(253, 224, 71, 0.3)');
+        sunGlow.addColorStop(1, 'rgba(253, 224, 71, 0)');
+        ctx.fillStyle = sunGlow;
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, sunR * 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Cœur éclatant du soleil
+        ctx.fillStyle = '#fef08a';
+        ctx.beginPath();
+        ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Nuages stylisés (Discrets pour habiller le ciel)
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.beginPath();
+        ctx.arc(w * 0.2, h * 0.15, baseSize * 0.04, 0, Math.PI * 2);
+        ctx.arc(w * 0.25, h * 0.14, baseSize * 0.06, 0, Math.PI * 2);
+        ctx.arc(w * 0.3, h * 0.16, baseSize * 0.03, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(w * 0.65, h * 0.25, baseSize * 0.03, 0, Math.PI * 2);
+        ctx.arc(w * 0.69, h * 0.24, baseSize * 0.05, 0, Math.PI * 2);
+        ctx.arc(w * 0.73, h * 0.26, baseSize * 0.02, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 3. Profondeur de champ : Montagnes lointaines (Atmosphériques, bleutées)
+        const farMountGrad = ctx.createLinearGradient(0, h * 0.25, 0, h * 0.45);
+        farMountGrad.addColorStop(0, '#7dd3fc'); // Se fond dans le ciel
+        farMountGrad.addColorStop(1, '#38bdf8');
+        ctx.fillStyle = farMountGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, h * 0.35);
+        ctx.quadraticCurveTo(w * 0.15, h * 0.28, w * 0.35, h * 0.36);
+        ctx.quadraticCurveTo(w * 0.55, h * 0.42, w * 0.75, h * 0.32);
+        ctx.quadraticCurveTo(w * 0.9, h * 0.28, w, h * 0.34);
+        ctx.lineTo(w, h * 0.45);
+        ctx.lineTo(0, h * 0.45);
+        ctx.fill();
+
+        // 4. Profondeur de champ : Collines intermédiaires (Vert d'eau clair)
+        const midHillGrad = ctx.createLinearGradient(0, h * 0.3, 0, h * 0.45);
+        midHillGrad.addColorStop(0, '#34d399');
+        midHillGrad.addColorStop(1, '#059669');
+        ctx.fillStyle = midHillGrad;
+        ctx.beginPath();
+        ctx.moveTo(0, h * 0.40);
+        ctx.quadraticCurveTo(w * 0.25, h * 0.33, w * 0.5, h * 0.39);
+        ctx.quadraticCurveTo(w * 0.8, h * 0.45, w, h * 0.37);
+        ctx.lineTo(w, h * 0.45);
+        ctx.lineTo(0, h * 0.45);
+        ctx.fill();
+
+        // Limites visuelles avant du sol (pour la bordure du terrarium)
+        const frontEdgeY = 0.82;
+        const frontControlY = 0.86;
+
+        // 1. Prairie (Sol principal)
+        const groundGradient = ctx.createLinearGradient(0, h * groundPhysics.control.y, 0, h * frontControlY);
+        groundGradient.addColorStop(0, '#4ade80'); // Vert plus clair/lumineux en haut
+        groundGradient.addColorStop(1, '#15803d'); // Vert sombre au bord (ombre)
+        ctx.fillStyle = groundGradient;
+        ctx.beginPath();
+        ctx.moveTo(groundPhysics.start.x * w, groundPhysics.start.y * h);
+        ctx.quadraticCurveTo(
+            groundPhysics.control.x * w, groundPhysics.control.y * h, 
+            groundPhysics.end.x * w, groundPhysics.end.y * h
+        );
+        ctx.lineTo(w, h * frontEdgeY);
+        ctx.quadraticCurveTo(w * 0.5, h * frontControlY, 0, h * frontEdgeY);
+        ctx.closePath();
+        ctx.fill();
+
+        // 2. Tranche de terre (Sous-sol organique)
+        const dirtGradient = ctx.createLinearGradient(0, h * frontEdgeY, 0, h);
+        dirtGradient.addColorStop(0, '#502311'); // Terre de surface riche
+        dirtGradient.addColorStop(0.4, '#3b1708'); // Terre moyenne
+        dirtGradient.addColorStop(1, '#1a0802'); // Profondeur très sombre
+        
+        ctx.fillStyle = dirtGradient;
+        ctx.beginPath();
+        ctx.moveTo(0, h * frontEdgeY);
+        ctx.quadraticCurveTo(w * 0.5, h * frontControlY, w, h * frontEdgeY);
+        ctx.lineTo(w, h);
+        ctx.lineTo(0, h);
+        ctx.closePath();
+        ctx.fill();
+
+        // 3. Détails du sous-sol (Strates et petits cailloux)
+        // On "clip" pour que les détails ne débordent pas hors de la terre
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(0, h * frontEdgeY);
+        ctx.quadraticCurveTo(w * 0.5, h * frontControlY, w, h * frontEdgeY);
+        ctx.lineTo(w, h);
+        ctx.lineTo(0, h);
+        ctx.clip();
+
+        // Dessiner quelques strates/racines sombres
+        ctx.strokeStyle = 'rgba(41, 15, 2, 0.6)';
+        ctx.lineWidth = baseSize * 0.008;
+        ctx.beginPath();
+        ctx.moveTo(0, h * (frontEdgeY + 0.03));
+        ctx.quadraticCurveTo(w * 0.3, h * (frontControlY + 0.01), w * 0.7, h * (frontEdgeY + 0.06));
+        ctx.moveTo(w * 0.2, h * (frontEdgeY + 0.08));
+        ctx.quadraticCurveTo(w * 0.6, h * (frontControlY + 0.08), w, h * (frontEdgeY + 0.12));
+        ctx.stroke();
+
+        // Dessiner des cailloux incrustés
+        const pebbles = [
+            {x: 0.15, y: 0.04, r: 0.015, c: '#78716c'},
+            {x: 0.82, y: 0.07, r: 0.022, c: '#57534e'},
+            {x: 0.45, y: 0.10, r: 0.010, c: '#a8a29e'},
+            {x: 0.30, y: 0.12, r: 0.018, c: '#44403c'},
+            {x: 0.65, y: 0.03, r: 0.012, c: '#78716c'},
+            {x: 0.90, y: 0.11, r: 0.016, c: '#57534e'}
+        ];
+        pebbles.forEach(p => {
+            // Position relative à la courbe du sol
+            const curY = Math.pow(1-p.x, 2)*frontEdgeY + 2*(1-p.x)*p.x*frontControlY + Math.pow(p.x, 2)*frontEdgeY;
+            const px = w * p.x;
+            const py = h * (curY + p.y);
+            const pr = baseSize * p.r;
+            
+            ctx.fillStyle = p.c;
+            ctx.beginPath(); ctx.arc(px, py, pr, 0, Math.PI * 2); ctx.fill();
+            // Reflet
+            ctx.fillStyle = 'rgba(255,255,255,0.1)';
+            ctx.beginPath(); ctx.arc(px - pr*0.2, py - pr*0.2, pr*0.4, 0, Math.PI * 2); ctx.fill();
+            // Ombre portée du caillou dans la terre
+            ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            ctx.beginPath(); ctx.arc(px, py + pr*0.5, pr*0.8, 0, Math.PI); ctx.fill();
+        });
+        ctx.restore(); // Fin du clip
+
+        // 4. Bordure d'herbe tombante (Overhang organique)
+        ctx.fillStyle = '#15803d'; // Vert sombre
+        ctx.beginPath();
+        const numBlades = 70; // Nombre de pointes d'herbe
+        ctx.moveTo(0, h * frontEdgeY);
+        for(let i = 0; i <= numBlades; i++) {
+            const t = i / numBlades;
+            const cx = w * t;
+            const cy = h * (Math.pow(1-t, 2)*frontEdgeY + 2*(1-t)*t*frontControlY + Math.pow(t, 2)*frontEdgeY);
+            
+            // Longueur de la pointe calculée de façon pseudo-aléatoire mais stable (pour éviter que l'herbe ne tremble à 60 FPS)
+            const rand = Math.abs(Math.sin(i * 12345.67)); 
+            const bladeLength = baseSize * (0.008 + rand * 0.015);
+            
+            ctx.lineTo(cx, cy + bladeLength); // Pointe vers le bas
+            
+            // Remonter vers la courbe pour la prochaine pointe
+            if (i < numBlades) {
+                const nextT = (i + 0.5) / numBlades;
+                const nextCx = w * nextT;
+                const nextCy = h * (Math.pow(1-nextT, 2)*frontEdgeY + 2*(1-nextT)*nextT*frontControlY + Math.pow(nextT, 2)*frontEdgeY);
+                ctx.lineTo(nextCx, nextCy);
+            }
+        }
+        // Fermer la forme proprement
+        ctx.lineTo(w, h * frontEdgeY);
+        ctx.quadraticCurveTo(w * 0.5, h * frontControlY - 2, 0, h * frontEdgeY);
+        ctx.closePath();
+        ctx.fill();
+
+        // 5. Ligne de lumière vive pour le volume du rebord
+        ctx.strokeStyle = '#4ade80';
+        ctx.lineWidth = Math.max(1, baseSize * 0.003);
+        ctx.beginPath();
+        ctx.moveTo(0, h * frontEdgeY);
+        ctx.quadraticCurveTo(w * 0.5, h * frontControlY, w, h * frontEdgeY);
+        ctx.stroke();
+
+        // Trier les éléments à dessiner selon leur profondeur (Z / Y)
+        const renderList = [
+            ...obstacles,
+            { type: 'ball', ...ball } // On ajoute la balle à la liste de rendu
+        ];
+
+        renderList.sort((a, b) => {
+            const depthA = a.type === 'ball' ? a.z : a.y;
+            const depthB = b.type === 'ball' ? b.z : b.y;
+            return depthA - depthB;
+        });
+
+        // Dessiner chaque élément avec la perspective appliquée
+        renderList.forEach(obj => {
+            const isBall = obj.type === 'ball';
+            const { px, pz, scale } = getScreenCoords(obj, w, h, isBall);
+            
+            // La balle ajoute sa hauteur (Y), les obstacles sont fixés au sol
+            const py = isBall ? pz - (obj.y * h * scale) : pz;
+            const size = (obj.size || 0) * baseSize * scale;
+
+            switch(obj.type) {
+                case 'tree': drawTree(px, py, size); break;
+                case 'rock': drawRock(px, py, size); break;
+                case 'bush': drawBush(px, py, size); break;
+                case 'log':  drawLog(px, py, size);  break;
+                case 'ball': 
+                    const r = obj.radius * baseSize * scale;
+                    drawBall(obj, px, py, pz, r); 
+                    break;
+            }
+        });
+    }
+
+    function drawBall(b, px, py, pz, r) {
+        // Dessin de l'ombre (Rétrécit si la balle vole haut)
+        const shadowR = r * 0.9 * Math.max(0, 1 - (b.y * 3));
+        if (shadowR > 0) {
+            drawShadow(px, pz, shadowR, shadowR * 0.3);
+        }
+
+        // CORRECTION : On décale le centre visuel de la balle vers le haut 
+        // de la valeur exacte de son rayon. Ainsi, elle se POSE sur le sol !
+        const centerY = py - r;
+
+        // Balle (Corps)
+        ctx.fillStyle = b.color;
+        ctx.beginPath();
+        ctx.arc(px, centerY, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Balle (Lumière / Reflet)
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+        ctx.beginPath();
+        ctx.arc(px - r * 0.25, centerY - r * 0.25, r * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    // NOUVEAUX DESSINS VECTORIELS :
+    // Chaque élément est rigoureusement dessiné en alignant son point de contact avec le sol exactement sur (x, y)
+    // afin que le rendu visuel corresponde à 100% avec les calculs géométriques des hitboxes ci-dessus.
+    
+    function drawTree(x, y, size) {
+        drawShadow(x, y, size * 0.8, size * 0.2); // Ancré au sol
+        
+        // 1. Tronc (Plus organique, base évasée et dégradé 3D)
+        const trunkGrad = ctx.createLinearGradient(x - size * 0.2, 0, x + size * 0.2, 0);
+        trunkGrad.addColorStop(0, '#451a03');   // Ombre à gauche
+        trunkGrad.addColorStop(0.4, '#78350f'); // Couleur principale au centre
+        trunkGrad.addColorStop(1, '#290f02');   // Ombre forte à droite
+
+        ctx.fillStyle = trunkGrad;
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.25, y); // Racine gauche
+        ctx.quadraticCurveTo(x - size * 0.1, y - size * 0.2, x - size * 0.12, y - size * 1.2);
+        ctx.lineTo(x + size * 0.12, y - size * 1.2);
+        ctx.quadraticCurveTo(x + size * 0.1, y - size * 0.2, x + size * 0.25, y); // Racine droite
+        ctx.closePath();
+        ctx.fill();
+
+        // Lignes d'écorce
+        ctx.strokeStyle = '#290f02';
+        ctx.lineWidth = Math.max(1, size * 0.03);
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.05, y - size * 0.1);
+        ctx.lineTo(x - size * 0.02, y - size * 0.8);
+        ctx.moveTo(x + size * 0.06, y - size * 0.2);
+        ctx.lineTo(x + size * 0.03, y - size * 0.6);
+        ctx.stroke();
+
+        // 2. Canopée (Effet "nuage" volumineux à plusieurs couches)
+        const cy = y - size * 1.3;
+
+        // Couche 1 : Ombre profonde (base du feuillage)
+        ctx.fillStyle = '#064e3b'; 
+        ctx.beginPath();
+        ctx.arc(x, cy, size * 0.65, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.35, cy + size * 0.2, size * 0.45, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.35, cy + size * 0.2, size * 0.45, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Couche 2 : Masse principale
+        ctx.fillStyle = '#15803d'; 
+        ctx.beginPath();
+        ctx.arc(x, cy - size * 0.1, size * 0.6, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.3, cy + size * 0.1, size * 0.45, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.3, cy + size * 0.1, size * 0.45, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.4, cy - size * 0.2, size * 0.4, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.4, cy - size * 0.2, size * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Couche 3 : Reflets lumineux (côté éclairé par le soleil)
+        ctx.fillStyle = '#4ade80'; 
+        ctx.beginPath();
+        ctx.arc(x, cy - size * 0.25, size * 0.45, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.25, cy - size * 0.15, size * 0.3, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.25, cy - size * 0.15, size * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Couche 4 : Touches de lumière fines au sommet
+        ctx.fillStyle = '#86efac'; 
+        ctx.beginPath();
+        ctx.arc(x - size * 0.1, cy - size * 0.4, size * 0.15, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.15, cy - size * 0.35, size * 0.12, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    function drawRock(x, y, size) {
+        drawShadow(x, y, size * 0.9, size * 0.2); // Ancré
+        
+        ctx.fillStyle = '#6b7280';
+        ctx.beginPath();
+        ctx.moveTo(x - size, y); 
+        ctx.lineTo(x - size * 0.5, y - size);
+        ctx.lineTo(x + size * 0.3, y - size * 0.8); 
+        ctx.lineTo(x + size * 0.8, y);
+        ctx.closePath(); ctx.fill();
+        
+        ctx.fillStyle = '#9ca3af';
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.9, y - size * 0.1); 
+        ctx.lineTo(x - size * 0.4, y - size * 0.9);
+        ctx.lineTo(x, y - size * 0.5); 
+        ctx.lineTo(x, y - size * 0.1);
+        ctx.closePath(); ctx.fill();
+    }
+
+    function drawBush(x, y, size) {
+        drawShadow(x, y, size * 1.0, size * 0.2); // Ombre au sol
+        
+        // 1. Petites branches à la base pour ancrer le buisson
+        ctx.strokeStyle = '#451a03'; // Brun très foncé
+        ctx.lineWidth = Math.max(1, size * 0.04);
+        ctx.beginPath();
+        ctx.moveTo(x - size * 0.1, y);
+        ctx.lineTo(x - size * 0.2, y - size * 0.3);
+        ctx.moveTo(x + size * 0.05, y);
+        ctx.lineTo(x + size * 0.15, y - size * 0.25);
+        ctx.moveTo(x + size * 0.2, y);
+        ctx.lineTo(x + size * 0.3, y - size * 0.15);
+        ctx.stroke();
+
+        // 2. Couche de base (Ombre profonde)
+        ctx.fillStyle = '#064e3b'; 
+        ctx.beginPath();
+        ctx.arc(x, y - size * 0.3, size * 0.55, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.35, y - size * 0.2, size * 0.4, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.35, y - size * 0.2, size * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+
+        // 3. Masse principale du feuillage
+        ctx.fillStyle = '#059669';
+        ctx.beginPath();
+        ctx.arc(x, y - size * 0.45, size * 0.5, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.3, y - size * 0.35, size * 0.4, 0, Math.PI * 2);
+        ctx.arc(x + size * 0.25, y - size * 0.35, size * 0.35, 0, Math.PI * 2);
+        ctx.arc(x - size * 0.15, y - size * 0.6, size * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // 4. Lumière et reflets principaux
+        ctx.fillStyle = '#10b981';
+        ctx.beginPath(); 
+        ctx.arc(x - size * 0.1, y - size * 0.65, size * 0.35, 0, Math.PI * 2); 
+        ctx.arc(x + size * 0.2, y - size * 0.45, size * 0.25, 0, Math.PI * 2); 
+        ctx.arc(x - size * 0.35, y - size * 0.45, size * 0.2, 0, Math.PI * 2); 
+        ctx.fill();
+
+        // 5. Touches de lumière fines (petites feuilles très exposées)
+        ctx.fillStyle = '#34d399';
+        ctx.beginPath(); 
+        ctx.arc(x - size * 0.2, y - size * 0.75, size * 0.12, 0, Math.PI * 2); 
+        ctx.arc(x + size * 0.15, y - size * 0.55, size * 0.1, 0, Math.PI * 2); 
+        ctx.arc(x - size * 0.4, y - size * 0.5, size * 0.08, 0, Math.PI * 2); 
+        ctx.fill();
+    }
+
+    function drawLog(x, y, size) {
+        drawShadow(x, y, size * 1.5, size * 0.2); // Ancré
+        
+        ctx.fillStyle = '#92400e';
+        ctx.beginPath(); 
+        ctx.roundRect(x - size, y - size * 0.5, size * 2, size * 0.5, size * 0.1); ctx.fill();
+        
+        ctx.fillStyle = '#fcd34d';
+        ctx.beginPath(); 
+        ctx.ellipse(x - size + size*0.1, y - size * 0.25, size * 0.1, size * 0.2, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    function drawShadow(x, y, radiusX, radiusY) {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+        ctx.beginPath(); ctx.ellipse(x, y, radiusX, radiusY, 0, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // --- ÉVÈNEMENTS (LANCER LA BALLE) ---
+    canvas.addEventListener('pointerdown', e => {
+        pointer.isDown = true;
+        pointer.x = e.clientX;
+        pointer.y = e.clientY;
+        pointer.history = [{ x: e.clientX, y: e.clientY, time: Date.now() }];
+
+        // Vérifier si on clique sur la balle avec les nouvelles coordonnées visuelles
+        const { px, pz, scale } = getScreenCoords(ball, canvas.width, canvas.height, true);
+        const r = ball.radius * Math.min(canvas.width, canvas.height) * scale;
+        
+        // CORRECTION : La zone de clic doit aussi être décalée pour correspondre à la balle redressée
+        const centerY = pz - (ball.y * canvas.height * scale) - r;
+        const br = r * 2.5;
+
+        if (Math.hypot(e.clientX - px, e.clientY - centerY) < br) {
+            ball.isDragging = true;
+            ball.vx = ball.vy = ball.vz = 0;
+        }
+    });
+
+    canvas.addEventListener('pointermove', e => {
+        if (!pointer.isDown) return;
+        pointer.x = e.clientX;
+        pointer.y = e.clientY;
+        pointer.history.push({ x: e.clientX, y: e.clientY, time: Date.now() });
+        if (pointer.history.length > 5) pointer.history.shift(); // Garde les 5 dernières frames pour calculer la vitesse
+    });
+
+    window.addEventListener('pointerup', e => {
+        if (ball.isDragging) {
+            ball.isDragging = false;
+            
+            // Calculer la force du lancer en fonction du glissement
+            if (pointer.history.length > 1) {
+                const first = pointer.history[0];
+                const last = pointer.history[pointer.history.length - 1];
+                const dt = Math.max(16, last.time - first.time); // Temps écoulé
+                
+                // Vitesse en pixels par frame (~16ms)
+                const frames = dt / 16.6; 
+                const dx_frame = (last.x - first.x) / frames;
+                const dy_frame = (last.y - first.y) / frames;
+
+                // Application des forces adaptées au nouveau rythme
+                ball.vx = (dx_frame / canvas.width) * 0.8;
+                ball.vz = (dy_frame / canvas.height) * 0.55; 
+                ball.vy = (-dy_frame / canvas.height) * 0.8; 
+
+                // Plafonner la vitesse
+                if (ball.vy > 0.10) ball.vy = 0.10; 
+                if (ball.vz < -0.04) ball.vz = -0.04;
+
+                // Empêcher de jeter sous le sol
+            if (ball.vy < 0) ball.vy = 0; 
+        }
+    }
+    pointer.isDown = false;
+});
+
+// --- ÉVÈNEMENTS UI (BOUTON LABO) ---
+const labButton = document.getElementById('labButton');
+
+// Empêche le toucher du bouton de déclencher des interactions avec le Canvas en dessous
+labButton.addEventListener('pointerdown', e => {
+    e.stopPropagation(); 
+});
+
+// Comportement "non connecté" mais réactif
+labButton.addEventListener('click', () => {
+    // Change temporairement le texte pour signaler que c'est en travaux (au lieu d'utiliser une alerte bloquante)
+    const originalText = labButton.innerHTML;
+    labButton.innerHTML = "🚧 En construction";
+    labButton.style.color = "#b45309"; // Couleur orange/chantier
+    labButton.style.borderColor = "#f59e0b";
+    
+    // Remet le bouton à la normale après 2 secondes
+    setTimeout(() => {
+        labButton.innerHTML = originalText;
+        labButton.style.color = "#15803d";
+        labButton.style.borderColor = "#4ade80";
+    }, 2000);
+});
+
+// --- BOUCLE DE JEU ---
+function gameLoop() {
+        if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        updatePhysics();
+        drawScene();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Lancer le jeu !
+    requestAnimationFrame(gameLoop);
+
+</script>
+</body>
+</html>
